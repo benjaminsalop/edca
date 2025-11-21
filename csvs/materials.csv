@@ -1,0 +1,5 @@
+﻿material_id,family,density_kg_per_m3,ec_a1a3_per_m3,ec_a1a3_per_kg,ec_a4_per_ton_km,transport_km,ec_a5_per_kg,cost_per_m3,cost_per_kg
+concrete,concrete,2400,330,,0.06,50,,120,
+pt,steel,7850,,2,0.06,200,0.02,,2.5
+steel,steel,7850,,2,0.06,200,0.02,,2
+clt,timber,520,-500,,0.06,600,,650,

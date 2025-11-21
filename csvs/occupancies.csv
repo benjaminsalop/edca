@@ -1,0 +1,15 @@
+﻿use,unit,sdl,sdl_partition,ll,code,notes
+Residential_US,imperial,0,15,40,ASCE,ASCE 7-22 Table 4.3-1 L=40 psf; SDL per actual materials (not prescribed).
+Office_US,imperial,0,15,50,ASCE,ASCE 7-22 Table 4.3-1 L=50 psf; §4.2.2 'Partitions': add 20 psf where partitions may be rearranged (commonly offices).
+Corridor_US,imperial,0,0,80,ASCE,ASCE 7-22 Corridors above first = 80 psf.
+Social_US,imperial,0,0,100,ASCE,ASCE 7-22 Dining = 100 psf.
+Assembly_US,imperial,0,0,100,ASCE,ASCE 7-22 Assembly typical = 100 psf (check use).
+Parking_US,imperial,0,0,40,ASCE,ASCE 7-22 Garages = 40 psf.
+Balcony_US,imperial,0,0,60,ASCE,"ASCE 7-22 Balconies ≥ 60 psf (1.5_ area served, cap 100 psf)."
+Residential_EU,metric,0,1,1.5,EC,EN 1991-1-1 A1/A2: qk=1.5 kN/m_; _0≈0.7. SDL from actual materials.
+Office_EU,metric,0,1,2.5,EC,EN 1991-1-1 Table 2.3: qk=2.5 kN/m_; _0≈0.7. SDL from actual materials.
+Corridor_EU,metric,0,0,4,EC,EN 1991-1-1 Table 2.4 C31: qk=3.0; _0≈0.7.
+Social_EU,metric,0,0,5,EC,EN 1991-1-1 Table 2.4 C11: qk=2.0; _0≈0.7.
+Assembly_EU,metric,0,0,5,EC,EN 1991-1-1 Table 2.4 C5: qk=5.0; _0≈0.7.
+Parking_EU,metric,0,0,2,EC,EN 1991-1-1 garages 2.5–4.0; using 2.5 with _0≈0.7.
+Balcony_EU,metric,0,0,2.5,EC,EN 1991-1-1 Table 2.2 A5: qk=2.5; _0≈0.7.

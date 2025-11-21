@@ -1,0 +1,73 @@
+╓──────────────────╖
+║  MODE / SOURCES  ║
+╙──────────────────╜
+- USE_CSV: #N                                           (*)
+- DATA_DIR: #/Users/benjaminsalop/Desktop/Oxford/Research/edca/csvs (*)
+
+╓────────────────╖
+║  PROJECT DATA  ║
+╙────────────────╜
+- PROJECT_NAME: Broadgate Tower
+- LOCATION: 12 Primrose Street, London, EC2A 2EG
+- UNIT: metric                 // metric | imperial
+- FLOOR_AREA_PER_FLOOR: 5000   // m^2 if metric, ft^2 if imperial
+- FLOOR_TO_FLOOR: 4            // m or ft
+- NUM_FLOORS: 9
+- IDEAL_COLUMN_SPACING:        // m or ft (used only if no SPANS/grid_options.csv) (*)
+- PLATE_LENGTH:                # optional; m or ft (blank => square plate) (*)
+- PLATE_WIDTH:                 # optional; m or ft (blank => square plate) (*)
+- DEPTH_LIMIT_ENABLED: #N      // Y|N  (*)
+- DEPTH_LIMIT:                 # numeric; m or in based on UNIT (*)
+- NOTES: #Structural floors only; depth limit disabled. (*)
+
+╓─────────╖
+║  SPANS  ║
+╙─────────╜
+- SPANS:  6.5                  // e.g. "7" (m) or "28ft, 32ft"  (*)
+- EDGE_CANTILEVER_MAX_M:  1    // max edge cantilever (m)
+
+# Load check mode:
+#   SPAN_PLUS_LOADS -> enforce catalog LL/SDL allowances
+#   SPAN_ONLY       -> ignore LL/SDL (screen by span/depth only)
+- LOAD_CHECK_MODE: #SPAN_PLUS_LOADS
+
+# Results scope (table granularity):
+#   PER_SYSTEM -> one row per system_id (selected best variant)  [default]
+#   PER_ROW    -> one row per catalog row (every variant)
+- RESULTS_SCOPE: #PER_SYSTEM
+
+╓───────────╖
+║  PROGRAM  ║
+╙───────────╜
+These define which floors use which occupancy (from occupancies.csv).
+If any PROGRAM entries are present (and USE_CSV != Y), program.csv is ignored.
+Use any of the formats below (you may mix and match). If a PROGRAM line exists,
+it takes precedence over PROGRAM_1/2/3 lines.
+
+- PROGRAM: #1-9 Parking_US                              (*)
+# - PROGRAM_1:                                          (*)
+# - PROGRAM_2:                                          (*)
+# - PROGRAM_3:                                          (*)
+
+╓──────────────────╖
+║  OUTPUT OPTIONS  ║
+╙──────────────────╜
+(no explicit output options yet; use CLI --export to write CSVs)
+
+# ---------------------------------------------------------------------------
+# CSV SCHEMAS (REFERENCE ONLY) — Do not edit keys below; these are comments.
+# ---------------------------------------------------------------------------
+# occupancies.csv columns:
+#   use, unit, sdl, sdl_partition, ll, code, notes
+#
+# systems_catalog.csv columns:
+#   system_id, category, type, manufacturer, unit, length, width, slab_depth, block_depth,
+#   swt, sdl, ll, max_span, material_concrete_id, material_pt_id, material_steel_id,
+#   material_timber_id, ebc_mm, beam_ref
+#
+# system_curves.csv columns:
+#   system_id, unit, concrete_volume, steel_volume, timber_volume, swt, depth
+#
+# materials.csv columns:
+#   material_id, family, density_kg_per_m3, ec_a1a3_per_m3, ec_a1a3_per_kg,
+#   ec_a4_per_ton_km, transport_km, ec_a5_per_kg, cost_per_m3, cost_per_kg
