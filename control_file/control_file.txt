@@ -61,12 +61,16 @@ it takes precedence over PROGRAM_1/2/3 lines.
 #   use, unit, sdl, sdl_partition, ll, code, notes
 #
 # systems_catalog.csv columns:
-#   system_id, category, type, manufacturer, unit, length, width, slab_depth, block_depth,
-#   swt, sdl, ll, max_span, material_concrete_id, material_pt_id, material_steel_id,
-#   material_timber_id, ebc_mm, beam_ref
+#   system_id, category, type, manufacturer, unit, length, width,
+#   slab_depth, beam_depth, screed_depth, steel_depth,
+#   swt, sdl, ll, max_span,
+#   material_concrete_id, material_pt_id, material_steel_id, material_timber_id,
+#   ebc_mm, beam_ref
 #
 # system_curves.csv columns:
-#   system_id, unit, concrete_volume, steel_volume, timber_volume, swt, depth
+#   system_id, unit,
+#   slab_depth, beam_depth, screed_depth, steel_depth,
+#   swt, concrete_volume, steel_volume, timber_volume, depth
 #
 # materials.csv columns:
 #   material_id, family, density_kg_per_m3, ec_a1a3_per_m3, ec_a1a3_per_kg,
