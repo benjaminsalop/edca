@@ -1,2 +1,4 @@
 .DS_Store
 *.pyc
+*.pyc
+/code/earlystruct/core/__pycache__
