@@ -37,6 +37,8 @@
 ╙─────────╜
 - SPANS:                       // e.g. "7" (m) or "28ft, 32ft"  (*)
 - EDGE_CANTILEVER_MAX_M:       // max edge cantilever (m)
+- SPAN_SWEEP_FROM_MIN: Y        # as before
+- SPAN_SWEEP_STEP: 1.0          # interpreted in UNIT (ft if imperial, m if metric)
 
 # Load check mode:
 #   SPAN_PLUS_LOADS -> enforce catalog LL/SDL allowances
@@ -47,6 +49,13 @@
 #   PER_SYSTEM -> one row per system_id (selected best variant)  [default]
 #   PER_ROW    -> one row per catalog row (every variant)
 - RESULTS_SCOPE: #PER_SYSTEM
+
+# One way slab irregularity — optional – if omitted we just align major span with the longer plate dimension:
+ONE_WAY_IRREGULAR: Y
+ONE_WAY_SLAB_MIN_SPAN: 8.0    # in UNIT (e.g. meters if UNIT: metric)
+ONE_WAY_BEAM_MIN_SPAN: 12.0   # in UNIT (e.g. meters if UNIT: metric)
+# optional, only if you want to override which global direction gets the longer span:
+# ONE_WAY_MAJOR_ALONG_LONGEST: Y
 
 ╓───────────╖
 ║  PROGRAM  ║

@@ -41,6 +41,17 @@ def parse_control(path: str) -> dict:
     # booleans
     data['USE_CSV_BOOL'] = _parse_bool(data.get('USE_CSV')) if 'USE_CSV' in data else False
     data['DEPTH_LIMIT_ENABLED_BOOL'] = _parse_bool(data.get('DEPTH_LIMIT_ENABLED')) if 'DEPTH_LIMIT_ENABLED' in data else False
+        # NEW: optional span sweep + one-way options
+    if 'SPAN_SWEEP_FROM_MIN' in data:
+        data['SPAN_SWEEP_FROM_MIN_BOOL'] = _parse_bool(data.get('SPAN_SWEEP_FROM_MIN'))
+    else:
+        data['SPAN_SWEEP_FROM_MIN_BOOL'] = False
+
+    if 'ONE_WAY_IRREGULAR' in data:
+        data['ONE_WAY_IRREGULAR_BOOL'] = _parse_bool(data.get('ONE_WAY_IRREGULAR'))
+    else:
+        data['ONE_WAY_IRREGULAR_BOOL'] = False
+
 
     # choose which program definitions to use:
     # - if any PROGRAM lines present -> use ONLY those

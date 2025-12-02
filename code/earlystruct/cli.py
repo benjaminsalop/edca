@@ -1,9 +1,10 @@
 # earlystruct/cli.py
 from __future__ import annotations
 import argparse, os, math
+from pathlib import Path
 import pandas as pd
 
-from .core import control, loads, curves, systems, quantities, impacts
+from .core import control, loads, curves, systems, quantities, impacts, reporting
 from .core.units import parse_spans_arg, span_to_m, area_to_m2, depth_to_m, load_to_knm2
 from .core.control import parse_control
 from .core.rank import carbon_first_then_cost, pareto_min_carbon_cost
@@ -34,7 +35,7 @@ def _norm_num(val, *, zero_is_none=False):
     if math.isnan(x):
         return None
     if zero_is_none and abs(x) < 1e-12:
-        return None
+        return None 
     return x
 
 # ---------------------------------
@@ -170,6 +171,63 @@ def evaluate(data_dir: str, spans_str: str|None, export_dir: str|None, control_f
     spans = collect_spans(project, grid_df, parse_spans_arg(spans_str) if spans_str else None, ctl)
     if not spans:
         spans = sweep_1ft_default()
+        # optional: sweep upwards from the minimum span until no typology can reach it
+    if ctl.get('SPAN_SWEEP_FROM_MIN_BOOL', False) and spans:
+        # what unit is the project in?
+        unit_flag_local = (unit_flag or 'metric').lower()
+        is_imperial = unit_flag_local.startswith('imp') or ('ft' in unit_flag_local)
+
+        # start from the smallest span the user / CSV / control file gave us
+        min_span_m = min(span_to_m(v, u) for (v, u) in spans)
+
+        # if we have a one-way slab with explicit slab min span, use that as the min
+        slab_min_m_for_sweep = ctl.get('_ONE_WAY_SLAB_MIN_M')  # set in one-way setup below
+        if slab_min_m_for_sweep is not None:
+            try:
+                slab_min_m_for_sweep = float(slab_min_m_for_sweep)
+                if slab_min_m_for_sweep > 0.0:
+                    min_span_m = max(min_span_m, slab_min_m_for_sweep)
+            except Exception:
+                pass
+
+        # global maximum span in catalog (in meters)
+        max_span_global_m = 0.0
+        for _, row in cat_df.iterrows():
+            try:
+                m = span_to_m(float(row.get('max_span', 0.0) or 0.0),
+                              str(row.get('unit', 'metric')))
+            except Exception:
+                m = 0.0
+            if m > max_span_global_m:
+                max_span_global_m = m
+        # fall back to something sensible if catalog gives us nothing
+        if max_span_global_m <= 0.0:
+            max_span_global_m = span_to_m(60.0, 'imperial')  # ~18 m
+
+        # step size: interpreted in project units
+        step_raw = ctl.get('SPAN_SWEEP_STEP')
+        try:
+            step_val = float(step_raw) if step_raw is not None else (1.0 if is_imperial else 0.25)
+        except Exception:
+            step_val = 1.0 if is_imperial else 0.25
+
+        if is_imperial:
+            # user gave step in feet
+            step_m = span_to_m(step_val, 'imperial')
+        else:
+            # user gave step in meters
+            step_m = span_to_m(step_val, 'metric')
+
+        if step_m <= 0.0:
+            step_m = span_to_m(1.0, 'imperial')  # safety fallback
+
+        # rebuild spans as a clean sweep (values stored in meters with 'metric' tag)
+        new_spans = []
+        s = min_span_m
+        while s <= max_span_global_m + 1e-9:
+            new_spans.append((s, 'metric'))   # values already in meters
+            s += step_m
+        spans = new_spans
 
     # geometry & loads (robust to NaN/0, area or LxW)
     unit_flag = str(project.get('unit','metric'))
@@ -198,23 +256,116 @@ def evaluate(data_dir: str, spans_str: str|None, export_dir: str|None, control_f
 
     edge_limit_m = float(ctl.get('EDGE_CANTILEVER_MAX_M')) if ctl.get('EDGE_CANTILEVER_MAX_M') else EDGE_CANTILEVER_DEFAULT_M
     systems_list = sorted(cat_df['system_id'].unique())
+    
+    # ONE-WAY IRREGULAR SETTINGS
+    oneway_enabled = bool(ctl.get('ONE_WAY_IRREGULAR_BOOL', False))
+    unit_flag_local = (unit_flag or 'metric').lower()
+    is_imperial = unit_flag_local.startswith('imp') or ('ft' in unit_flag_local)
 
+    def _span_val_to_m(val):
+        v = float(val)
+        if is_imperial:
+            return span_to_m(v, 'imperial')
+        else:
+            return span_to_m(v, 'metric')
+
+    # explicit min spans for slab and beam directions (in project units)
+    slab_min_m = None
+    beam_min_m = None
+    slab_min_raw = ctl.get('ONE_WAY_SLAB_MIN_SPAN')
+    beam_min_raw = ctl.get('ONE_WAY_BEAM_MIN_SPAN')
+    try:
+        if slab_min_raw is not None:
+            slab_min_m = _span_val_to_m(slab_min_raw)
+    except Exception:
+        slab_min_m = None
+    try:
+        if beam_min_raw is not None:
+            beam_min_m = _span_val_to_m(beam_min_raw)
+    except Exception:
+        beam_min_m = None
+
+    # store slab min (if any) back into ctl so span sweep can reuse it
+    if slab_min_m is not None and slab_min_m > 0.0:
+        ctl['_ONE_WAY_SLAB_MIN_M'] = slab_min_m
+
+    # derive major factor from these min spans if possible
+    major_factor_from_min = None
+    if (
+        slab_min_m is not None and beam_min_m is not None
+        and slab_min_m > 0.0 and beam_min_m > slab_min_m
+    ):
+        major_factor_from_min = beam_min_m / slab_min_m
+
+    # optional manual override for the major factor
+    major_factor_raw = ctl.get('ONE_WAY_MAJOR_FACTOR')
+    try:
+        oneway_major_factor = float(major_factor_raw) if major_factor_raw is not None else 1.0
+    except Exception:
+        oneway_major_factor = 1.0
+
+    # if we have good min spans, they win over the manual factor
+    if major_factor_from_min is not None:
+        oneway_major_factor = major_factor_from_min
+
+    if oneway_major_factor < 1.0:
+        oneway_major_factor = 1.0
+
+    major_along_longest = str(ctl.get('ONE_WAY_MAJOR_ALONG_LONGEST', 'Y')).strip().upper() in {
+        'Y', 'YES', 'TRUE', 'T', '1'
+    }
+
+    def _is_one_way_system(row_any: dict) -> bool:
+        txt = " ".join(
+            str(row_any.get(k, "")) for k in ("type", "system_name", "category", "system_id")
+        ).lower()
+        return ("one way" in txt) or ("one-way" in txt) or ("one_way" in txt) or ("1way" in txt)
+
+    # >>> ADD / ENSURE THIS LINE EXISTS BEFORE THE LOOPS <<<
     out_rows = []
-    for span_val, span_unit in spans:
-        span_m_target = span_to_m(span_val, span_unit)
-        L, W = derive_plate(floor_area_m2, L_m, W_m)
-        nx, ny, sx, sy, ex, ey = layout_grid_with_edge_limit(L, W, span_m_target, span_m_target, edge_limit_m)
-        span_m_used = span_m_target  # honor exact user span for feasibility
 
+    # sweep over spans
+    for span_val, span_unit in spans:
+        span_m_input = span_to_m(span_val, span_unit)
+        L, W = derive_plate(floor_area_m2, L_m, W_m)
+
+        # loop over systems
         for sys_id in systems_list:
             feasible_all = True
             reasons = []
+
+            # basic catalog info
+            row_any = cat_df[cat_df['system_id'] == sys_id].iloc[0].to_dict()
+            system_label = row_any.get('system_name') or row_any.get('type', '') or sys_id
+
+            # one-way detection + irregular spans
+            is_one_way = _is_one_way_system(row_any)
+            span_x = span_m_input
+            span_y = span_m_input
+
+            if oneway_enabled and is_one_way and oneway_major_factor > 1.0:
+                base_span_m = span_m_input
+                if (L is not None) and (W is not None) and major_along_longest:
+                    if L >= W:
+                        span_x = base_span_m * oneway_major_factor   # beam dir
+                        span_y = base_span_m                          # slab dir
+                    else:
+                        span_x = base_span_m                          # slab dir
+                        span_y = base_span_m * oneway_major_factor   # beam dir
+                else:
+                    span_x = base_span_m * oneway_major_factor
+                    span_y = base_span_m
+
+            nx, ny, sx, sy, ex, ey = layout_grid_with_edge_limit(
+                L, W, span_x, span_y, edge_limit_m
+            )
+            span_m_used = max(span_x, span_y)
 
             per_m2 = curves.get_intensities(curves_df, sys_id)
             swt_sys_knm2 = per_m2.get('swt', 0.0)
 
             total_area = 0.0
-            total_qty = {'concrete_m3':0.0,'steel_m3':0.0,'timber_m3':0.0}
+            total_qty = {'concrete_m3': 0.0, 'steel_m3': 0.0, 'timber_m3': 0.0}
             depth_m = per_m2.get('depth', 0.0)
 
             for _, pb in req_df.iterrows():
@@ -222,7 +373,7 @@ def evaluate(data_dir: str, spans_str: str|None, export_dir: str|None, control_f
                 area_block = floor_area_m2 * floors
                 total_area += area_block
 
-                mode = str(ctl.get('LOAD_CHECK_MODE','SPAN_PLUS_LOADS')).upper()
+                mode = str(ctl.get('LOAD_CHECK_MODE', 'SPAN_PLUS_LOADS')).upper()
                 best_row, reason = systems.check_rows_for_system(
                     cat_df, sys_id,
                     pb['req_sdl_non_swt_knm2'],
@@ -242,7 +393,6 @@ def evaluate(data_dir: str, spans_str: str|None, export_dir: str|None, control_f
                     total_qty[k] += qty[k]
                 depth_m = qty.get('depth_m', depth_m)
 
-            row_any = cat_df[cat_df['system_id']==sys_id].iloc[0].to_dict()
             mat_ids = {
                 'material_concrete_id': row_any.get('material_concrete_id') or '',
                 'material_steel_id': row_any.get('material_steel_id') or '',
@@ -251,27 +401,47 @@ def evaluate(data_dir: str, spans_str: str|None, export_dir: str|None, control_f
             }
 
             carbon_total, cost_total, _ = impacts.calc_impacts_cost(total_qty, mat_ids, mats_by_id)
-            carbon_per_m2 = (carbon_total/total_area) if total_area>0 else float('nan')
-            cost_per_m2   = (cost_total/total_area) if total_area>0 else float('nan')
-            system_label  = row_any.get('system_name') or row_any.get('type','') or sys_id
+            carbon_per_m2 = (carbon_total / total_area) if total_area > 0 else float('nan')
+            cost_per_m2   = (cost_total   / total_area) if total_area > 0 else float('nan')
+
+            # NEW: explicit slab vs beam directions for reporting
+            if oneway_enabled and is_one_way and oneway_major_factor > 1.0:
+                slab_dir_span_m = span_m_input
+                beam_dir_span_m = span_m_input * oneway_major_factor
+            else:
+                slab_dir_span_m = span_m_input
+                beam_dir_span_m = span_m_input
 
             out_rows.append({
-                "span_m": span_m_used,
+                "span_input_m": span_m_input,      # base (slab) span
+                "span_m": span_m_used,            # controlling span
+                "span_x_m": span_x,
+                "span_y_m": span_y,
+                "span_slab_dir_m": slab_dir_span_m,
+                "span_beam_dir_m": beam_dir_span_m,
+
                 "system_id": sys_id,
                 "system_name": system_label,
-                "category": row_any.get('category',''),
-                "type": row_any.get('type',''),
-                "manufacturer": row_any.get('manufacturer',''),
+                "category": row_any.get('category', ''),
+                "type": row_any.get('type', ''),
+                "manufacturer": row_any.get('manufacturer', ''),
+
                 "feasible": bool(feasible_all),
                 "reason": "; ".join([r for r in reasons if r]) if reasons else "",
+
                 "depth_m": depth_m,
-                "carbon_total_kg": carbon_total,
-                "carbon_per_m2": carbon_per_m2,
-                "cost_total": cost_total,
-                "cost_per_m2": cost_per_m2,
                 "area_m2": total_area,
+                "concrete_m3": total_qty.get('concrete_m3', 0.0),
+                "steel_m3":    total_qty.get('steel_m3', 0.0),
+                "timber_m3":   total_qty.get('timber_m3', 0.0),
+                "carbon_total_kg": carbon_total,
+                "carbon_per_m2":  carbon_per_m2,
+                "cost_total":     cost_total,
+                "cost_per_m2":    cost_per_m2,
+
                 "nx": nx, "ny": ny,
-                "edge_canti_x_m": ex, "edge_canti_y_m": ey
+                "edge_canti_x_m": ex,
+                "edge_canti_y_m": ey,
             })
 
     df = pd.DataFrame(out_rows)
@@ -283,25 +453,29 @@ def evaluate(data_dir: str, spans_str: str|None, export_dir: str|None, control_f
         saved = save_csvs(df, pareto, export_dir)
     return df, ranked, pareto, saved
 
-# ---------------------------------
-# CLI entry
-# ---------------------------------
 def main():
-    p = argparse.ArgumentParser(prog="earlystruct")
-    p.add_argument("--data-dir", required=True, help="Folder with required CSVs")
-    p.add_argument("--spans", help="Comma-separated spans, e.g. '9,10.5' or '28ft, 32ft'")
-    p.add_argument("--export", help="Output folder to save CSV results")
-    p.add_argument("--control-file", help="Path to control file (.txt). If provided, it takes precedence unless USE_CSV=Y.")
-    args = p.parse_args()
-    df, ranked, pareto, saved = evaluate(args.data_dir, args.spans, args.export, args.control_file)
-    print("=== SUMMARY (feasible candidates, carbon-first) ===")
-    if not ranked.empty:
-        print(ranked[['span_m','system_id','system_name','category','carbon_per_m2','cost_per_m2','depth_m']].head(30).to_string(index=False))
-    else:
-        print("No feasible candidates. Showing closest failures:")
-        print(df.sort_values('reason').head(10).to_string(index=False))
-    if saved[0]:
-        print(f"Saved CSVs to: {saved[0]} and {saved[1]}")
+    parser = argparse.ArgumentParser(description="Parametric floor design explorer")
+    parser.add_argument("--control", "-c", required=True, help="Path to control file")
+    parser.add_argument("--data-dir", "-d", required=True, help="Path to CSV data directory")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Print verbose summary")
+    args = parser.parse_args()
+
+    # data_dir arg is in filesystem coordinates, so wrap with Path
+    from . import cli as self_cli  # if evaluate is here; or just use evaluate directly
+
+    df, ranked, pareto, saved = self_cli.evaluate(
+        data_dir=Path(args.data_dir),
+        spans_str=None,
+        export_dir=None,
+        control_file=args.control,
+    )
+
+    if args.verbose:
+        project = saved.get("project", {}) if isinstance(saved, dict) else {}
+        ctl = saved.get("ctl", {}) if isinstance(saved, dict) else {}
+        from earlystruct.core import reporting  # explicit import
+        reporting.print_verbose_summary(df, project, ctl)
+
 
 if __name__ == "__main__":
     main()
