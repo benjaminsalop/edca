@@ -1,47 +1,49 @@
 ╓──────────────────╖
 ║  MODE / SOURCES  ║
 ╙──────────────────╜
-- USE_CSV: #N                                           (*)
-- DATA_DIR: #/Users/benjaminsalop/Desktop/Oxford/Research/edca/csvs (*)
+- USE_CSV:  N                                                      (*)
+- DATA_DIR: /Users/benjaminsalop/Desktop/Oxford/Research/edca/csvs (*)
 
 ╓────────────────╖
 ║  PROJECT DATA  ║
 ╙────────────────╜
-- PROJECT_NAME: Broadgate Tower
-- LOCATION: 12 Primrose Street, London, EC2A 2EG
+- PROJECT_NAME: Warneford Research Building
+- LOCATION: Warneford Ln, Headington, Oxford OX3 7JX
 - UNIT: metric                 // metric | imperial
-- FLOOR_AREA_PER_FLOOR: 5000   // m^2 if metric, ft^2 if imperial
-- FLOOR_TO_FLOOR: 4            // m or ft
-- NUM_FLOORS: 9
+- FLOOR_AREA_PER_FLOOR: 5690   // m^2 if metric, ft^2 if imperial
+- FLOOR_TO_FLOOR: 4.275        // m or ft
+- NUM_FLOORS: 5                // not including roof
 - IDEAL_COLUMN_SPACING:        // m or ft (used only if no SPANS/grid_options.csv) (*)
-- PLATE_LENGTH:                # optional; m or ft (blank => square plate) (*)
-- PLATE_WIDTH:                 # optional; m or ft (blank => square plate) (*)
-- DEPTH_LIMIT_ENABLED: #N      // Y|N  (*)
-- DEPTH_LIMIT:                 # numeric; m or in based on UNIT (*)
+- PLATE_LENGTH:                // optional; m or ft (blank => square plate) (*)
+- PLATE_WIDTH:                 // optional; m or ft (blank => square plate) (*)
+- DEPTH_LIMIT_ENABLED:         // Y|N  (*)
+- DEPTH_LIMIT:                 // numeric; m or in based on UNIT (*)
 - NOTES: #Structural floors only; depth limit disabled. (*)
 
 ╓─────────╖
 ║  SPANS  ║
 ╙─────────╜
-- SPANS:  6.5                  // e.g. "7" (m) or "28ft, 32ft"  (*)
+- SPANS:                       // e.g. "7" (m) or "28ft, 32ft"  (*)
 - EDGE_CANTILEVER_MAX_M:  1    // max edge cantilever (m)
-- SPAN_SWEEP_FROM_MIN: Y        # as before
-- SPAN_SWEEP_STEP: 1.0          # interpreted in UNIT (ft if imperial, m if metric)
+- SPAN_SWEEP_FROM_MIN: Y       // as before
+- SPAN_SWEEP_STEP: 1.0         // interpreted in UNIT (ft if imperial, m if metric)
 
 # Load check mode:
 #   SPAN_PLUS_LOADS -> enforce catalog LL/SDL allowances
 #   SPAN_ONLY       -> ignore LL/SDL (screen by span/depth only)
-- LOAD_CHECK_MODE: #SPAN_PLUS_LOADS
+
+- LOAD_CHECK_MODE: SPAN_PLUS_LOADS
 
 # Results scope (table granularity):
 #   PER_SYSTEM -> one row per system_id (selected best variant)  [default]
 #   PER_ROW    -> one row per catalog row (every variant)
-- RESULTS_SCOPE: #PER_SYSTEM
+
+- RESULTS_SCOPE: PER_SYSTEM
 
 # One way slab irregularity — optional – if omitted we just align major span with the longer plate dimension:
-ONE_WAY_IRREGULAR: Y
-ONE_WAY_SLAB_MIN_SPAN: 8.0    # in UNIT (e.g. meters if UNIT: metric)
-ONE_WAY_BEAM_MIN_SPAN: 12.0   # in UNIT (e.g. meters if UNIT: metric)
+- ONE_WAY_IRREGULAR: Y
+- ONE_WAY_SLAB_MIN_SPAN: 6.6    // in UNIT (e.g. meters if UNIT: metric)
+- ONE_WAY_BEAM_MIN_SPAN: 9      // in UNIT (e.g. meters if UNIT: metric)
 # optional, only if you want to override which global direction gets the longer span:
 # ONE_WAY_MAJOR_ALONG_LONGEST: Y
 
@@ -53,7 +55,7 @@ If any PROGRAM entries are present (and USE_CSV != Y), program.csv is ignored.
 Use any of the formats below (you may mix and match). If a PROGRAM line exists,
 it takes precedence over PROGRAM_1/2/3 lines.
 
-- PROGRAM: #1-9 Parking_US                              (*)
+  - PROGRAM: 1-4 Laboratory_EU                          (*)
 # - PROGRAM_1:                                          (*)
 # - PROGRAM_2:                                          (*)
 # - PROGRAM_3:                                          (*)

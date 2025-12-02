@@ -13,3 +13,4 @@ Social_EU,metric,0,0,5,EC,EN 1991-1-1 Table 2.4 C11: qk=2.0; _0≈0.7.
 Assembly_EU,metric,0,0,5,EC,EN 1991-1-1 Table 2.4 C5: qk=5.0; _0≈0.7.
 Parking_EU,metric,0,0,2,EC,EN 1991-1-1 garages 2.5–4.0; using 2.5 with _0≈0.7.
 Balcony_EU,metric,0,0,2.5,EC,EN 1991-1-1 Table 2.2 A5: qk=2.5; _0≈0.7.
+Laboratory_EU,metric,2.3,1,4,EC,Warneford Sample Data

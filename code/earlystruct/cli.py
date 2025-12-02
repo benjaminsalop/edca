@@ -41,6 +41,25 @@ def _norm_num(val, *, zero_is_none=False):
 # ---------------------------------
 # Inline CSV loader (no external dependency)
 # ---------------------------------
+def _bool_from_ctl(ctl: dict, base_key: str, default: bool = False) -> bool:
+    """
+    Try to interpret a boolean from the control dict.
+
+    Priority:
+      1) <BASE_KEY>_BOOL if present
+      2) raw <BASE_KEY> (Y/N, True/False, 1/0, etc.)
+    """
+    bool_key = f"{base_key}_BOOL"
+    if bool_key in ctl:
+        return bool(ctl[bool_key])
+
+    raw = ctl.get(base_key)
+    if raw is None:
+        return default
+
+    s = str(raw).strip().upper()
+    return s in {"Y", "YES", "TRUE", "T", "1"}
+
 REQUIRED = [
     "project.csv", "program.csv", "occupancies.csv",
     "materials.csv", "systems_catalog.csv", "system_curves.csv"
@@ -162,6 +181,19 @@ def evaluate(data_dir: str, spans_str: str|None, export_dir: str|None, control_f
             'depth_limit': pick('DEPTH_LIMIT', csv_proj.get('depth_limit','')),
             'notes': pick('NOTES', csv_proj.get('notes','')),
         }
+    
+    # figure out the unit system from project / control
+    unit_flag = (
+        project.get("UNIT")
+        or project.get("unit")
+        or ctl.get("UNIT")
+        or ctl.get("unit")
+        or "metric"
+    )
+    # geometry & loads (robust to NaN/0, area or LxW)
+    area_raw  = _norm_num(project.get('floor_area_per_floor'), zero_is_none=True)
+    L_raw     = _norm_num(project.get('plate_length'),        zero_is_none=True)
+    W_raw     = _norm_num(project.get('plate_width'),         zero_is_none=True)
 
     # control-file program (if provided and USE_CSV != Y)
     if (not use_csv) and ctl.get('PROGRAM_BLOCKS'):
@@ -228,12 +260,6 @@ def evaluate(data_dir: str, spans_str: str|None, export_dir: str|None, control_f
             new_spans.append((s, 'metric'))   # values already in meters
             s += step_m
         spans = new_spans
-
-    # geometry & loads (robust to NaN/0, area or LxW)
-    unit_flag = str(project.get('unit','metric'))
-    area_raw  = _norm_num(project.get('floor_area_per_floor'), zero_is_none=True)
-    L_raw     = _norm_num(project.get('plate_length'),        zero_is_none=True)
-    W_raw     = _norm_num(project.get('plate_width'),         zero_is_none=True)
 
     if area_raw is not None and area_raw > 0:
         floor_area_m2 = area_to_m2(area_raw, unit_flag)
@@ -448,10 +474,18 @@ def evaluate(data_dir: str, spans_str: str|None, export_dir: str|None, control_f
     ranked = carbon_first_then_cost(df)
     pareto = pareto_min_carbon_cost(df)
 
-    saved = (None, None)
+    saved: dict[str, object] = {
+        "project": project,
+        "ctl": ctl,
+        "spans": spans,
+    }
+
     if export_dir:
-        saved = save_csvs(df, pareto, export_dir)
+        csv_info = save_csvs(df, pareto, export_dir)
+        saved["csv"] = csv_info
+
     return df, ranked, pareto, saved
+
 
 def main():
     parser = argparse.ArgumentParser(description="Parametric floor design explorer")

@@ -223,6 +223,16 @@ def print_verbose_summary(df: pd.DataFrame, project: dict, ctl: dict, file=sys.s
       - quantities: concrete_m3, steel_m3, timber_m3
       - impacts: cost_total, cost_per_m2, carbon_total_kg, carbon_per_m2
     """
+    def _bool_from_ctl(base_key: str, default: bool = False) -> bool:
+        bool_key = f"{base_key}_BOOL"
+        if bool_key in ctl:
+            return bool(ctl[bool_key])
+        raw = ctl.get(base_key)
+        if raw is None:
+            return default
+        s = str(raw).strip().upper()
+        return s in {"Y", "YES", "TRUE", "T", "1"}
+    
     if df.empty:
         print("No candidate systems generated.", file=file)
         return
