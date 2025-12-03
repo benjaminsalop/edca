@@ -97,7 +97,15 @@ def check_rows_for_system(cat_df: pd.DataFrame, system_id: str,
 
     if feasible:
         feasible.sort(key=lambda t: (t[0]['span_over'], t[0]['ll_over'] + t[0]['sdl_over']))
-        return feasible[0][1], None
+        caps, best_row = feasible[0]
+
+        # HARD ASSERT: never accept a row whose max_span_m is below span_m
+        if caps["max_span_m"] + 1e-9 < span_m:
+            raise ValueError(
+                f"BUG: selected catalog row for system {system_id} with span {span_m:.2f} m > "
+                f"max_span {caps['max_span_m']:.2f} m"
+            )
+        return best_row, None
 
     return None, best_miss_reason
 
