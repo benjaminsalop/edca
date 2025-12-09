@@ -103,6 +103,14 @@ def parse_control(path: str) -> dict:
     else:
         data['DEPTH_LIMIT_ENABLED_BOOL'] = False
 
+    # NEW: frame (beam/column) penalties toggle
+    if 'FRAME_PENALTIES_ENABLED' in data:
+        data['FRAME_PENALTIES_ENABLED_BOOL'] = _parse_bool(data.get('FRAME_PENALTIES_ENABLED'))
+    else:
+    # default: ON (to keep current behaviour if not specified)
+        data['FRAME_PENALTIES_ENABLED_BOOL'] = True
+
+
     # NEW: optional span sweep + one-way options
     if 'SPAN_SWEEP_FROM_MIN' in data:
         data['SPAN_SWEEP_FROM_MIN_BOOL'] = _parse_bool(data.get('SPAN_SWEEP_FROM_MIN'))

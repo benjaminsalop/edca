@@ -172,6 +172,19 @@ def _system_max_slab_span_m(cat_df: pd.DataFrame, system_id: str) -> float:
             max_m = m
     return max_m
 
+def _depth_ctl_to_m(ctl: dict, key: str, unit_flag: str, default_m: float) -> float:
+    """
+    Read a depth-like control value (e.g. beam width, depth) and convert to meters
+    using the project unit. Falls back to default_m if missing/invalid.
+    """
+    raw = _norm_num(ctl.get(key), zero_is_none=True)
+    if raw is None:
+        return default_m
+    try:
+        return depth_to_m(raw, unit_flag)
+    except Exception:
+        return default_m
+
 
 # ---------------------------------
 # Main evaluation
@@ -392,6 +405,30 @@ def evaluate(data_dir: str, spans_str: str | None, export_dir: str | None,
     L_m = span_to_m(L_raw, unit_flag) if (L_raw is not None and L_raw > 0) else None
     W_m = span_to_m(W_raw, unit_flag) if (W_raw is not None and W_raw > 0) else None
 
+    # NEW: floor-to-floor height in meters (for column volumes)
+    floor_h_raw = _norm_num(project.get("floor_to_floor"), zero_is_none=True)
+    if floor_h_raw is not None and floor_h_raw > 0:
+        floor_height_m = depth_to_m(floor_h_raw, unit_flag)
+    else:
+        floor_height_m = 3.0  # fallback default
+
+        # ---- frame (beam/column) penalties knobs ----
+    frame_enabled = bool(ctl.get("FRAME_PENALTIES_ENABLED_BOOL", True))
+
+    # Slenderness (L/d)
+    try:
+        frame_beam_slenderness = float(ctl.get("FRAME_BEAM_SLENDERNESS", 20.0) or 20.0)
+    except Exception:
+        frame_beam_slenderness = 20.0
+    if frame_beam_slenderness <= 0.0:
+        frame_beam_slenderness = 20.0
+
+    # Beam & column geometry (converted from project units to meters)
+    frame_beam_width_m    = _depth_ctl_to_m(ctl, "FRAME_BEAM_WIDTH",    unit_flag, 0.20)
+    frame_column_width_m  = _depth_ctl_to_m(ctl, "FRAME_COLUMN_WIDTH",  unit_flag, 0.30)
+    frame_column_depth_m  = _depth_ctl_to_m(ctl, "FRAME_COLUMN_DEPTH",  unit_flag, 0.30)
+    frame_beam_depth_max_m= _depth_ctl_to_m(ctl, "FRAME_BEAM_DEPTH_MAX",unit_flag, 0.80)
+
     # ---- loads, materials, limits, systems ----
     req_df = loads.required_loads_per_block(program_df, occ_df)
     mats_by_id = {r["material_id"]: r for _, r in mats_df.iterrows()}
@@ -409,7 +446,9 @@ def evaluate(data_dir: str, spans_str: str | None, export_dir: str | None,
         if ctl.get("EDGE_CANTILEVER_MAX_M")
         else EDGE_CANTILEVER_DEFAULT_M
     )
-    systems_list = sorted(cat_df["system_id"].unique())
+
+    # make sure system_id is uniform strings and drop missing values
+    systems_list = sorted(cat_df["system_id"].dropna().astype(str).unique())
 
     # ---- main sweep over spans & systems ----
     out_rows = []
@@ -453,7 +492,7 @@ def evaluate(data_dir: str, spans_str: str | None, export_dir: str | None,
             else:
                 slab_dir_span_m = span_m_input
                 beam_dir_span_m = span_m_input
-            
+
             span_m_for_catalog = slab_dir_span_m
 
             # HARD CAP: catalog max span applies to slab direction only
@@ -470,37 +509,20 @@ def evaluate(data_dir: str, spans_str: str | None, export_dir: str | None,
             swt_sys_knm2 = per_m2.get("swt", 0.0)
 
             total_area = 0.0
-            total_qty = {"concrete_m3": 0.0, "steel_m3": 0.0, "timber_m3": 0.0}
-            depth_m = per_m2.get("depth", 0.0)
+            # UPDATED: track slab + beam + column volumes separately
+            total_qty = {
+                "concrete_m3": 0.0,          # overall
+                "concrete_slab_m3": 0.0,
+                "concrete_beams_m3": 0.0,
+                "concrete_columns_m3": 0.0,
+                "steel_m3": 0.0,
+                "timber_m3": 0.0,
+            }
+            slab_depth_m = float(per_m2.get("depth", 0.0) or 0.0)
+            beam_depth_m = 0.0  # will be set by frame model
 
             # use **slab span only** for catalog checks
             span_m_for_catalog = slab_dir_span_m
-
-            for _, pb in req_df.iterrows():
-                floors = int(pb["end_floor"]) - int(pb["start_floor"]) + 1
-                area_block = floor_area_m2 * floors
-                total_area += area_block
-
-                mode = str(ctl.get("LOAD_CHECK_MODE", "SPAN_PLUS_LOADS")).upper()
-                best_row, reason = systems.check_rows_for_system(
-                    cat_df,
-                    sys_id,
-                    pb["req_sdl_non_swt_knm2"],
-                    pb["req_ll_knm2"],
-                    swt_sys_knm2,
-                    span_m_for_catalog,  # **slab direction only**
-                    depth_limit_m,
-                    load_check_mode=mode,
-                )
-
-                if best_row is None or reason:
-                    feasible_all = False
-                    reasons.append(reason or "no row")
-
-                qty = quantities.totals_from_intensity(per_m2, area_block)
-                for k in total_qty:
-                    total_qty[k] += qty[k]
-                depth_m = qty.get("depth_m", depth_m)
 
             mat_ids = {
                 "material_concrete_id": row_any.get("material_concrete_id") or "",
@@ -508,17 +530,172 @@ def evaluate(data_dir: str, spans_str: str | None, export_dir: str | None,
                 "material_timber_id": row_any.get("material_timber_id") or "",
                 "material_pt_id": row_any.get("material_pt_id") or "",
             }
+            has_concrete = bool(mat_ids["material_concrete_id"])
 
-            carbon_total, cost_total, _ = impacts.calc_impacts_cost(
-                total_qty, mat_ids, mats_by_id
+            frame_int = {
+                "concrete_volume_beams_m3_per_m2": 0.0,
+                "concrete_volume_columns_m3_per_m2": 0.0,
+                "beam_depth_m": 0.0,
+                "beam_depth_required_m": 0.0,
+                "beam_ok": True,
+            }
+
+            # Only apply frame penalties if:
+            #   - system actually has concrete
+            #   - we know the floor height
+            #   - the feature is enabled in the control file
+            if frame_enabled and has_concrete and floor_height_m > 0.0:
+                slab_type = "one_way" if is_one_way else "two_way"
+                frame_int = quantities.frame_concrete_intensities_per_m2(
+                    span_x_m=span_x,
+                    span_y_m=span_y,
+                    floor_height_m=floor_height_m,
+                    slab_type=slab_type,
+                    beam_width_m=frame_beam_width_m,
+                    beam_slenderness=frame_beam_slenderness,
+                    beam_depth_max_m=frame_beam_depth_max_m,
+                    column_width_m=frame_column_width_m,
+                    column_depth_m=frame_column_depth_m,
+                )
+                beam_depth_m = float(frame_int.get("beam_depth_m", 0.0) or 0.0)
+
+                # SOFT CHECK: note that slenderness is exceeded, but don't kill feasibility.
+                # This leaves you with results, and you can see which ones are "dodgy".
+                if not frame_int.get("beam_ok", True):
+                    reasons.append("beam_slenderness_exceeded")
+            else:
+                # penalties disabled or not applicable → no extra beam/column volume
+                beam_depth_m = 0.0
+
+            for _, pb in req_df.iterrows():
+                floors = int(pb["end_floor"]) - int(pb["start_floor"]) + 1
+                area_block = floor_area_m2 * floors
+                total_area += area_block
+
+                # LOAD CHECK MODE:
+                #   - default is LOADS_ONLY (lenient, like earlier behaviour)
+                #   - if control explicitly requests SPAN_PLUS_LOADS, we try that first
+                raw_mode = ctl.get("LOAD_CHECK_MODE", "LOADS_ONLY")
+                mode = str(raw_mode).upper()
+
+                # First attempt: whatever mode the control asked for
+                best_row, reason = systems.check_rows_for_system(
+                    cat_df,
+                    sys_id,
+                    pb["req_sdl_non_swt_knm2"],
+                    pb["req_ll_knm2"],
+                    swt_sys_knm2,
+                    span_m_for_catalog,  # slab direction only
+                    depth_limit_m,
+                    load_check_mode=mode,
+                )
+
+                # If strict SPAN_PLUS_LOADS fails, fall back to LOADS_ONLY before
+                # declaring the system infeasible.
+                if (best_row is None or reason) and mode == "SPAN_PLUS_LOADS":
+                    best_row2, reason2 = systems.check_rows_for_system(
+                        cat_df,
+                        sys_id,
+                        pb["req_sdl_non_swt_knm2"],
+                        pb["req_ll_knm2"],
+                        swt_sys_knm2,
+                        span_m_for_catalog,
+                        depth_limit_m,
+                        load_check_mode="LOADS_ONLY",
+                    )
+                    if (best_row2 is not None) and (not reason2):
+                        best_row, reason = best_row2, reason2
+                        mode = "LOADS_ONLY"
+
+                if best_row is None or reason:
+                    feasible_all = False
+                    reasons.append(reason or f"no row (mode={mode})")
+
+                # SLAB quantities (existing behaviour)
+                qty = quantities.totals_from_intensity(per_m2, area_block)
+
+                slab_conc = float(qty.get("concrete_m3", 0.0) or 0.0)
+                steel_m3  = float(qty.get("steel_m3", 0.0) or 0.0)
+                timber_m3 = float(qty.get("timber_m3", 0.0) or 0.0)
+
+                total_qty["concrete_slab_m3"] += slab_conc
+                total_qty["steel_m3"]         += steel_m3
+                total_qty["timber_m3"]        += timber_m3
+
+                # BEAM & COLUMN concrete quantities (per-m² * area_block)
+                if has_concrete:
+                    v_beams_block = frame_int["concrete_volume_beams_m3_per_m2"] * area_block
+                    v_cols_block  = frame_int["concrete_volume_columns_m3_per_m2"] * area_block
+                else:
+                    v_beams_block = 0.0
+                    v_cols_block  = 0.0
+
+                total_qty["concrete_beams_m3"]   += v_beams_block
+                total_qty["concrete_columns_m3"] += v_cols_block
+
+                # Keep a total concrete volume for backwards compatibility
+                total_qty["concrete_m3"] = (
+                    total_qty["concrete_slab_m3"]
+                    + total_qty["concrete_beams_m3"]
+                    + total_qty["concrete_columns_m3"]
+                )
+
+                slab_depth_m = qty.get("depth_m", slab_depth_m)
+
+                        # Overall structural depth = max(slab, beam)
+            depth_struct_m = max(slab_depth_m, beam_depth_m)
+
+            # -------------------------------------------------
+            #  SLAB / BEAMS / COLUMNS: separate impact calls
+            # -------------------------------------------------
+            # Assumption: our frame model only adds CONCRETE in beams/columns.
+            # All steel/timber in total_qty is part of the slab system.
+            qty_slab = {
+                "concrete_m3": total_qty.get("concrete_slab_m3", 0.0),
+                "steel_m3":    total_qty.get("steel_m3", 0.0),
+                "timber_m3":   total_qty.get("timber_m3", 0.0),
+            }
+            qty_beams = {
+                "concrete_m3": total_qty.get("concrete_beams_m3", 0.0),
+            }
+            qty_cols = {
+                "concrete_m3": total_qty.get("concrete_columns_m3", 0.0),
+            }
+
+            # Slab impacts
+            carbon_slab_kg, cost_slab, _ = impacts.calc_impacts_cost(
+                qty_slab, mat_ids, mats_by_id
             )
+
+            # Beam impacts
+            carbon_beams_kg, cost_beams, _ = impacts.calc_impacts_cost(
+                qty_beams, mat_ids, mats_by_id
+            )
+
+            # Column impacts
+            carbon_cols_kg, cost_cols, _ = impacts.calc_impacts_cost(
+                qty_cols, mat_ids, mats_by_id
+            )
+
+            # Totals
+            carbon_total = carbon_slab_kg + carbon_beams_kg + carbon_cols_kg
+            cost_total   = cost_slab + cost_beams + cost_cols
+
             carbon_per_m2 = (carbon_total / total_area) if total_area > 0 else float("nan")
-            cost_per_m2 = (cost_total / total_area) if total_area > 0 else float("nan")
+            cost_per_m2   = (cost_total   / total_area) if total_area > 0 else float("nan")
+
+            carbon_slab_per_m2   = (carbon_slab_kg  / total_area) if total_area > 0 else 0.0
+            carbon_beams_per_m2  = (carbon_beams_kg / total_area) if total_area > 0 else 0.0
+            carbon_cols_per_m2   = (carbon_cols_kg  / total_area) if total_area > 0 else 0.0
+
+            cost_slab_per_m2     = (cost_slab   / total_area) if total_area > 0 else 0.0
+            cost_beams_per_m2    = (cost_beams  / total_area) if total_area > 0 else 0.0
+            cost_cols_per_m2     = (cost_cols   / total_area) if total_area > 0 else 0.0
 
             out_rows.append(
                 {
                     "span_input_m": slab_dir_span_m,   # slab span
-                    "span_m": beam_dir_span_m,         # if you want controlling (beam) span
+                    "span_m": beam_dir_span_m,         # controlling (beam) span if you like
                     "span_x_m": span_x,
                     "span_y_m": span_y,
                     "span_slab_dir_m": slab_dir_span_m,
@@ -530,15 +707,34 @@ def evaluate(data_dir: str, spans_str: str | None, export_dir: str | None,
                     "manufacturer": row_any.get("manufacturer", ""),
                     "feasible": bool(feasible_all),
                     "reason": "; ".join([r for r in reasons if r]) if reasons else "",
-                    "depth_m": depth_m,
+                    "depth_m": depth_struct_m,
+                    "slab_depth_m": slab_depth_m,
+                    "beam_depth_m": beam_depth_m,
                     "area_m2": total_area,
+                    # volumes
                     "concrete_m3": total_qty.get("concrete_m3", 0.0),
+                    "concrete_slab_m3": total_qty.get("concrete_slab_m3", 0.0),
+                    "concrete_beams_m3": total_qty.get("concrete_beams_m3", 0.0),
+                    "concrete_columns_m3": total_qty.get("concrete_columns_m3", 0.0),
                     "steel_m3": total_qty.get("steel_m3", 0.0),
                     "timber_m3": total_qty.get("timber_m3", 0.0),
+                    # carbon & cost
                     "carbon_total_kg": carbon_total,
                     "carbon_per_m2": carbon_per_m2,
+                    "carbon_slab_kg": carbon_slab_kg,
+                    "carbon_beams_kg": carbon_beams_kg,
+                    "carbon_columns_kg": carbon_cols_kg,
+                    "carbon_slab_per_m2": carbon_slab_per_m2,
+                    "carbon_beams_per_m2": carbon_beams_per_m2,
+                    "carbon_columns_per_m2": carbon_cols_per_m2,
                     "cost_total": cost_total,
                     "cost_per_m2": cost_per_m2,
+                    "cost_slab": cost_slab,
+                    "cost_beams": cost_beams,
+                    "cost_columns": cost_cols,
+                    "cost_slab_per_m2": cost_slab_per_m2,
+                    "cost_beams_per_m2": cost_beams_per_m2,
+                    "cost_columns_per_m2": cost_cols_per_m2,
                     "nx": nx,
                     "ny": ny,
                     "edge_canti_x_m": ex,

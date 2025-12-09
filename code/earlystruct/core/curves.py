@@ -18,43 +18,39 @@ def _to_m(val, unit: str) -> float | None:
 
 def get_intensities(curves_df: pd.DataFrame, system_id: str) -> dict:
     """
-    Returns per-m² intensities for a system:
-      - concrete_m3_per_m2, steel_m3_per_m2, timber_m3_per_m2
-      - swt (kN/m²)  [already entered per-m² in your CSVs]
-      - depth (m)    if 'depth' present, use it; else sum component depths
-    Handles new columns: slab_depth, beam_depth, screed_depth, steel_depth.
+    For a given system_id, return per-m² material intensities and depth.
+
+    Uses columns from system_curves.csv:
+      - swt              [kN/m²]
+      - concrete_volume  [m³/m²]
+      - steel_volume     [m³/m²]
+      - timber_volume    [m³/m²]
+      - depth            [m]
     """
-    rows = curves_df[curves_df['system_id'] == system_id]
+    rows = curves_df[curves_df["system_id"] == system_id]
     if rows.empty:
-        # default zeros if missing
-        return dict(concrete_m3_per_m2=0.0, steel_m3_per_m2=0.0, timber_m3_per_m2=0.0,
-                    swt=0.0, depth=0.0)
+        return {
+            "concrete_m3_per_m2": 0.0,
+            "steel_m3_per_m2": 0.0,
+            "timber_m3_per_m2": 0.0,
+            "swt": 0.0,
+            "depth": 0.0,
+        }
 
     r = rows.iloc[0]
-    unit = str(r.get('unit', 'metric'))
 
-    conc = float(r.get('concrete_volume', 0.0) or 0.0)
-    steel = float(r.get('steel_volume', 0.0) or 0.0)
-    timber = float(r.get('timber_volume', 0.0) or 0.0)
-    swt = float(r.get('swt', 0.0) or 0.0)
+    def _f(name: str, default: float = 0.0) -> float:
+        v = r.get(name, default)
+        try:
+            return float(v)
+        except Exception:
+            return float(default)
 
-    # Depth: prefer explicit 'depth'; else sum new components
-    depth_explicit = _to_m(r.get('depth', None), unit)
-    if depth_explicit is not None:
-        depth_m = depth_explicit
-    else:
-        parts = [
-            _to_m(r.get('slab_depth', None), unit),
-            _to_m(r.get('beam_depth', None), unit),
-            _to_m(r.get('screed_depth', None), unit),
-            _to_m(r.get('steel_depth', None), unit),
-        ]
-        depth_m = sum([p for p in parts if p is not None]) if any(p is not None for p in parts) else 0.0
+    return {
+        "concrete_m3_per_m2": _f("concrete_volume", 0.0),
+        "steel_m3_per_m2":    _f("steel_volume", 0.0),
+        "timber_m3_per_m2":   _f("timber_volume", 0.0),
+        "swt":                _f("swt", 0.0),
+        "depth":              _f("depth", 0.0),
+    }
 
-    return dict(
-        concrete_m3_per_m2=conc,
-        steel_m3_per_m2=steel,
-        timber_m3_per_m2=timber,
-        swt=swt,
-        depth=depth_m
-    )

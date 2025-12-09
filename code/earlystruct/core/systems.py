@@ -30,26 +30,86 @@ def _depth_from_row(r, unit):
     return None
 
 def _row_caps(row, span_m, depth_limit_m, req_ll, req_sdl_non_swt, load_check_mode: str):
-    unit = row.get('unit', 'metric')
-    max_span_m = span_to_m(row.get('max_span', 0.0), unit)
-    depth_m = _depth_from_row(row, unit)
-    sdl_cap = load_to_knm2(row.get('sdl', 0.0), unit)   # allowance (excl. SWT)
-    ll_cap  = load_to_knm2(row.get('ll',  0.0), unit)
+    """
+    Evaluate catalog row capacity vs required span, depth, and loads.
 
+    Key behaviour changes vs previous version:
+      - 'sdl' in the catalog is treated as an OPTIONAL explicit allowance.
+        If it's 0 / blank / missing, we DO NOT fail the row on SDL, even if
+        req_sdl_non_swt > 0. In that case we only enforce LL.
+      - LL is still enforced if the catalog provides an LL capacity.
+    """
+    unit = row.get('unit', 'metric')
+
+    # Span and depth
+    max_span_m = span_to_m(row.get('max_span', 0.0) or 0.0, unit)
+    depth_m    = _depth_from_row(row, unit)
+
+    # Raw catalog values (before unit conversion)
+    raw_sdl = row.get('sdl', None)
+    raw_ll  = row.get('ll',  None)
+
+    sdl_cap = load_to_knm2(raw_sdl or 0.0, unit)
+    ll_cap  = load_to_knm2(raw_ll  or 0.0, unit)
+
+    # Basic checks
     span_ok  = (max_span_m + 1e-9) >= span_m
     depth_ok = True if depth_limit_m is None else (depth_m is not None and depth_m <= depth_limit_m)
+
     mode = str(load_check_mode).upper()
-    load_ok  = True if mode == "SPAN_ONLY" else ((ll_cap >= req_ll) and (sdl_cap >= req_sdl_non_swt))
+
+    if mode == "SPAN_ONLY":
+        load_ok = True
+    else:
+        # ---- Live load check ----
+        if req_ll <= 0.0:
+            ll_ok = True
+        else:
+            # If catalog has an LL capacity ( > 0 ), enforce it.
+            has_ll_cap = raw_ll not in (None, '', '0') and float(raw_ll) > 0.0
+            if not has_ll_cap:
+                # No LL given in catalog; be conservative and fail if we actually need LL
+                ll_ok = False
+            else:
+                ll_ok = (ll_cap >= req_ll)
+
+        # ---- SDL check (lenient) ----
+        # If occupancy requires no extra SDL, nothing to check.
+        if req_sdl_non_swt <= 0.0:
+            sdl_ok = True
+        else:
+            # Treat 0 / blank SDL in catalog as "unspecified" → DO NOT block feasibility.
+            has_sdl_cap = raw_sdl not in (None, '', '0') and float(raw_sdl) > 0.0
+            if not has_sdl_cap:
+                sdl_ok = True
+            else:
+                sdl_ok = (sdl_cap >= req_sdl_non_swt)
+
+        load_ok = ll_ok and sdl_ok
 
     # slack/oversizing (prefer smaller positive values)
     span_over = max(0.0, max_span_m - span_m)
-    ll_over   = max(0.0, ll_cap - req_ll)
-    sdl_over  = max(0.0, sdl_cap - req_sdl_non_swt)
+
+    # For LL/SDL "overage", only meaningful if caps are actually specified
+    ll_over = 0.0
+    if raw_ll not in (None, '', '0') and float(raw_ll) > 0.0 and req_ll > 0.0:
+        ll_over = max(0.0, ll_cap - req_ll)
+
+    sdl_over = 0.0
+    if raw_sdl not in (None, '', '0') and float(raw_sdl) > 0.0 and req_sdl_non_swt > 0.0:
+        sdl_over = max(0.0, sdl_cap - req_sdl_non_swt)
 
     return {
-        "span_ok": span_ok, "depth_ok": depth_ok, "load_ok": load_ok,
-        "span_over": span_over, "ll_over": ll_over, "sdl_over": sdl_over,
-        "max_span_m": max_span_m, "depth_m": depth_m, "ll_cap": ll_cap, "sdl_cap": sdl_cap
+        "span_ok": span_ok,
+        "depth_ok": depth_ok,
+        "load_ok": load_ok,
+        "span_over": span_over,
+        "ll_over": ll_over,
+        "sdl_over": sdl_over,
+        "max_span_m": max_span_m,
+        "depth_m": depth_m,
+        "ll_cap": ll_cap,
+        "sdl_cap": sdl_cap,
     }
 
 def check_rows_for_system(cat_df: pd.DataFrame, system_id: str,
