@@ -1,15 +1,4 @@
 .DS_Store
 *.pyc
-*.pyc
 /code/earlystruct/core/__pycache__
-*.pyc
-*.pyc
-*.pyc
-*.pyc
-/code/earlystruct/core/__pycache__
-*.pyc
-*.pyc
-/code/earlystruct/core/__pycache__
-code/earlystruct/__pycache__/cli.cpython-312.pyc
-code/earlystruct/__pycache__/cli.cpython-312.pyc
-code/earlystruct/core/__pycache__/systems.cpython-312.pyc
+/code/earlystruct/__pycache__
