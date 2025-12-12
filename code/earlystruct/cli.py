@@ -506,6 +506,17 @@ def evaluate(data_dir: str, spans_str: str | None, export_dir: str | None,
             )
 
             per_m2 = curves.get_intensities(curves_df, sys_id)
+            # Quick exclusion: if the slab has no material intensity at all (placeholder row),
+            # skip this system so it doesn't show zero slab carbon/cost.
+            if (
+                float(per_m2.get("concrete_m3_per_m2", 0.0) or 0.0) <= 0.0
+                and float(per_m2.get("steel_m3_per_m2", 0.0) or 0.0) <= 0.0
+                and float(per_m2.get("timber_m3_per_m2", 0.0) or 0.0) <= 0.0
+            ):
+                if verbose:
+                    print(f"[skip] {sys_id}: slab material intensities are all zero in system_curves.")
+                continue
+
             swt_sys_knm2 = per_m2.get("swt", 0.0)
 
             total_area = 0.0
