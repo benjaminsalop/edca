@@ -78,6 +78,24 @@ def load_all(data_dir: str):
     grid_options = None
     if os.path.exists(join(data_dir, "grid_options.csv")):
         grid_options = pd.read_csv(join(data_dir, "grid_options.csv"))
+    # --- NEW: metric-normalized helper columns for plots ---
+    from .core.units import span_to_m, depth_to_m, load_to_knm2
+    def _unit(u): 
+        s = str(u).strip().lower()
+        return 'imperial' if s.startswith('imp') or s in {'imperial','us','us customary'} else 'metric'
+    if not cat.empty:
+        units = cat.get('unit', 'metric').map(_unit)
+        # spans
+        if 'max_span' in cat.columns:
+            cat['max_span_m'] = [span_to_m(v, u) for v, u in zip(cat['max_span'], units)]
+        # depths (write only if columns exist)
+        for c in ('slab_depth','beam_depth','screed_depth','steel_depth'):
+            if c in cat.columns:
+                cat[f'{c}_m'] = [depth_to_m(v, u) for v, u in zip(cat[c], units)]
+        # load allowances
+        for c in ('sdl','ll'):
+            if c in cat.columns:
+                cat[f'{c}_knm2'] = [load_to_knm2(v, u) for v, u in zip(cat[c], units)]
     return project, program, occ, mats, cat, curves_, grid_options
 
 # ---------------------------------
@@ -506,18 +524,23 @@ def evaluate(data_dir: str, spans_str: str | None, export_dir: str | None,
             )
 
             per_m2 = curves.get_intensities(curves_df, sys_id)
-            # Quick exclusion: if the slab has no material intensity at all (placeholder row),
-            # skip this system so it doesn't show zero slab carbon/cost.
+            # Exclude systems whose slab material intensities are all zero.
+            def _nz(x):
+                try:
+                    x = float(x)
+                except Exception:
+                    return 0.0
+                return x if x > 0.0 and x == x else 0.0  # filter nonpositive & NaN
             if (
-                float(per_m2.get("concrete_m3_per_m2", 0.0) or 0.0) <= 0.0
-                and float(per_m2.get("steel_m3_per_m2", 0.0) or 0.0) <= 0.0
-                and float(per_m2.get("timber_m3_per_m2", 0.0) or 0.0) <= 0.0
+                _nz(per_m2.get("concrete_m3_per_m2", 0.0)) == 0.0
+                and _nz(per_m2.get("steel_m3_per_m2", 0.0)) == 0.0
+                and _nz(per_m2.get("timber_m3_per_m2", 0.0)) == 0.0
             ):
-                if verbose:
-                    print(f"[skip] {sys_id}: slab material intensities are all zero in system_curves.")
+                # Optional: uncomment to see which are skipped when running verbose
+                # print(f"[skip] {sys_id}: all slab material intensities are zero in system_curves.")
                 continue
-
             swt_sys_knm2 = per_m2.get("swt", 0.0)
+
 
             total_area = 0.0
             # UPDATED: track slab + beam + column volumes separately
