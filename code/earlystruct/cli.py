@@ -785,6 +785,80 @@ def evaluate(data_dir: str, spans_str: str | None, export_dir: str | None,
         csv_info = save_csvs(df, pareto, export_dir)
         saved["csv"] = csv_info
 
+        # --- EUROCODE CHECK (optional integration) ---
+    # Try to run the preserved EC2 check on the best-ranked concrete typology and store the result in `saved`.
+    # This is safe if the helper module is missing (we catch ImportError) and will not interrupt the sweep.
+    try:
+        # attempt to load a bar spacing CSV from the data directory if present
+        bar_spacing_df = None
+        bar_path = os.path.join(data_dir, "bar_spacing.csv")
+        if os.path.exists(bar_path):
+            try:
+                bar_spacing_df = pd.read_csv(bar_path)
+            except Exception:
+                bar_spacing_df = None
+
+        # dynamic import of your slab-check wrapper (adjust module name if you placed it elsewhere)
+        # expected function: run_code_check_for_typology(systems_catalog, typology_selector=None, bar_spacing_df=None, program_df=None)
+        try:
+            # if you put the checker in earlystruct/core or another package, change import path here
+            from slab_checks_preserve import run_code_check_for_typology  # try top-level module first
+        except Exception:
+            try:
+                # fallback: maybe the file lives inside the package (earlystruct)
+                from earlystruct.slab_checks_preserve import run_code_check_for_typology
+            except Exception:
+                run_code_check_for_typology = None
+
+        euro_report = None
+        if run_code_check_for_typology is not None:
+            # pick a recommended typology:
+            chosen_system_id = None
+            # prefer the top-ranked feasible system if available
+            if isinstance(ranked, pd.DataFrame) and (not ranked.empty):
+                # pick first feasible if that column exists, otherwise first row
+                if "feasible" in ranked.columns:
+                    feasible_rows = ranked[ranked["feasible"] == True]
+                    if not feasible_rows.empty:
+                        chosen_system_id = feasible_rows.iloc[0].get("system_id")
+                if chosen_system_id is None:
+                    chosen_system_id = ranked.iloc[0].get("system_id")
+            # fallback to pareto
+            if chosen_system_id is None and isinstance(pareto, pd.DataFrame) and (not pareto.empty):
+                chosen_system_id = pareto.iloc[0].get("system_id")
+            # fallback to full df
+            if chosen_system_id is None and isinstance(df, pd.DataFrame) and (not df.empty):
+                chosen_system_id = df.iloc[0].get("system_id")
+
+            # run the check if we have a chosen id
+            if chosen_system_id:
+                try:
+                    euro_report = run_code_check_for_typology(
+                        systems_catalog=cat_df,
+                        typology_selector=chosen_system_id,
+                        bar_spacing_df=bar_spacing_df,
+                        program_df=program_df if 'program_df' in locals() else None,
+                    )
+                except Exception as e:
+                    # keep integration non-fatal: save error message for debugging
+                    euro_report = {"error": f"Eurocode check raised exception: {e}"}
+
+        # store result in saved for later inspection by CLI or notebook
+        saved["eurocode_check"] = euro_report
+
+        # optional: if control file requested verbose eurocode output, print it here
+        # ctl may be present; prefer ctl verbosity, otherwise if export_dir provided print summary
+        want_ec_verbose = bool(ctl.get("EUROCODE_CHECK_VERBOSE_BOOL", False)) or bool(ctl.get("VERBOSE_BOOL", False))
+        if (euro_report is not None) and want_ec_verbose:
+            import json
+            print("\n--- Eurocode check (integrated) ---")
+            print(json.dumps(euro_report, indent=2, default=str))
+    except Exception as _e:
+        # ensure sweep always returns even if integration fails
+        saved["eurocode_check"] = {"error": f"Integration wrapper failed: {_e}"}
+
+    # end eurocode integration
+
     return df, ranked, pareto, saved
 
 def main():

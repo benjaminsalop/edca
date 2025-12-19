@@ -2,7 +2,99 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 import math
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+import json
+
+def run_code_check_for_typology(systems_catalog: pd.DataFrame,
+                                typology_selector: Optional[str | int] = None,
+                                bar_spacing_df: pd.DataFrame | None = None,
+                                program_df: pd.DataFrame | None = None) -> dict:
+    """
+    Look up a typology in systems_catalog and run the preserved-EC2 checks.
+    - systems_catalog: DataFrame with your systems (must contain system_id or be indexed).
+    - typology_selector: either an integer row index, or a system_id string. If None, uses the first concrete row.
+    - bar_spacing_df: optional DataFrame for bar areas (same schema as original CSV).
+    - program_df: optional program.csv DataFrame (if you want to pull loads/psi from there).
+    Returns a dictionary with pass/fail, reinforcement, and diagnostics.
+    """
+    # 1) choose the row
+    if typology_selector is None:
+        # default: pick first row in systems_catalog that looks like concrete (category == 'concrete' OR type contains 'rc')
+        mask = None
+        if 'category' in systems_catalog.columns:
+            mask = systems_catalog['category'].str.lower().eq('concrete')
+        elif 'type' in systems_catalog.columns:
+            mask = systems_catalog['type'].str.lower().str.contains('rc|concrete', na=False)
+        if mask is not None and mask.any():
+            sel_row = systems_catalog[mask].iloc[0]
+        else:
+            # fallback: first row
+            sel_row = systems_catalog.iloc[0]
+    else:
+        if isinstance(typology_selector, int):
+            sel_row = systems_catalog.iloc[typology_selector]
+        else:
+            # assume string system_id
+            sel_row = systems_catalog[systems_catalog.get('system_id','') == typology_selector].iloc[0]
+
+    # convert row to dict so check function can read overriding values
+    row_dict = sel_row.to_dict()
+
+    # If program_df provided, allow it to override loads/psi for this particular typology or building program
+    # (common keys: 'll', 'psi_factor', 'partition_load_kN_m2', etc.)
+    if program_df is not None:
+        # naive merge: if a program row exists with same 'system_id' use its values.
+        if 'system_id' in program_df.columns:
+            pmatch = program_df[program_df['system_id'] == sel_row.get('system_id')]
+            if len(pmatch) > 0:
+                # update row_dict with program overrides (only keys that exist)
+                row_dict.update(pmatch.iloc[0].dropna().to_dict())
+
+    # call the preserved-math checker written earlier
+    results = check_slab_row_preserve_math(row_dict, bar_spacing_df=bar_spacing_df)
+
+    # Evaluate pass/fail criteria:
+    # - deflection check: we preserved the l/d algebra; use deflection result (you may change threshold logic)
+    deflection_ok = results['deflection']['max_span_int'] >= sel_row.get('span', sel_row.get('max_span', Dimensions['base_slab_length']))
+    # - shear check: ensure V_rdc >= V_ed (we returned V_rdcmin too)
+    shear_ok = (results['shear']['V_rdc'] >= results['shear']['V_ed_ext']) if results['shear']['V_ed_ext'] is not None else True
+    # - flexural reinforcement: require that allowable bar was selected (non-None) else mark as warning/fail
+    flex = results['flex']
+    flex_ok = (flex.get('allowable_ext_reinforcement') is not None and flex.get('allowable_int_reinforcement') is not None)
+
+    pass_overall = bool(deflection_ok and shear_ok and flex_ok)
+
+    # Build a concise reinforcement summary (As per m, rho)
+    reinforcement = {
+        "As_req_ext_mm2_per_m": flex["required_ext_reinforcement"],
+        "As_allowable_ext_mm2": flex["allowable_ext_reinforcement"],
+        "rho_ext": flex["rho_ext"],
+        "As_req_int_mm2_per_m": flex["required_int_reinforcement"],
+        "As_allowable_int_mm2": flex["allowable_int_reinforcement"],
+        "rho_int": flex["rho_int"]
+    }
+
+    diagnostics = {
+        "G_kN_m2": results["G_kN_m2"],
+        "Q_kN_m2": results["Q_kN_m2"],
+        "ULS_kN_m2": results["ULS_kN_m2"],
+        "effective_depth_m": results["slab_effective_depth_m"],
+        "deflection": results["deflection"],
+        "shear": results["shear"],
+        "flex_details": results["flex"]
+    }
+
+    output = {
+        "system_id": sel_row.get("system_id"),
+        "pass": pass_overall,
+        "deflection_ok": bool(deflection_ok),
+        "shear_ok": bool(shear_ok),
+        "flex_ok": bool(flex_ok),
+        "reinforcement": reinforcement,
+        "diagnostics": diagnostics
+    }
+
+    return output
 
 # load bar spacing (unchanged path)
 bar_spacing = pd.read_csv('/Users/benjaminsalop/Desktop/Oxford/Research/edca/csvs/bar_spacing.csv')
@@ -103,12 +195,14 @@ def ultimate_loading(permanent_load: float, variable_load: float, psi_factor: fl
     # Your original return used min(max(...), ...). That pattern is unusual; to preserve intent:
     # keep the same expression but ensure it evaluates deterministically.
     # EDITED: implement exactly `min(max(ec_610b, ec_610a), ec_610)` as you wrote.
+    print(f"ULS combinations: {ec_610}, {ec_610a}, {ec_610b}")
     return min(max(ec_610b, ec_610a), ec_610)
 
 
 # Do NOT call ultimate_loading() at module import; caller must pass actual G and Q.
 
 def slab_dimensions(base_slab_depth: float,
+                    base_screed_depth: float,
                     d_rebar: float,
                     base_environmental_cover: float,
                     base_deviation_allowance: float,
@@ -125,7 +219,7 @@ def slab_dimensions(base_slab_depth: float,
     a1 = min(base_slab_depth / 2.0, base_wall_thickness / 2.0)
     a2 = min(base_slab_depth / 2.0, base_wall_thickness / 2.0)
     effective_span = a1 + a2 + base_slab_length
-    effective_depth = base_slab_depth - nominal_cover - d_rebar / 2.0
+    effective_depth = base_slab_depth + base_screed_depth - nominal_cover - d_rebar / 2.0
     if effective_depth <= 0:
         raise ValueError("Effective depth non-positive: check slab_depth / covers / rebar diameter.")
     return {
@@ -276,26 +370,28 @@ def deflection_design(required_ext_reinforcement: float,
     # Convert where your original expressions used divisions by 1000 — preserve that algebra:
     # Example: original had SQRT(f_ck/1000) -> np.sqrt(f_ck_value / 1000.0)
     # Compute N_ext exactly as you wrote:
-    N_ext = 11 + 1.5 * np.sqrt(f_ck_value / 1000.0) * (rho_ext / rho_0) + 3.2 * np.sqrt(f_ck_value / 1000.0) * ( (rho_ext / rho_0 - 1) ** 1.5 )
+    N_ext = 11 + 1.5 * np.sqrt(f_ck_value / 1000.0) * (rho_0 / rho_ext) + 3.2 * np.sqrt(f_ck_value / 1000.0) * ( (rho_0 / rho_ext - 1) ** 1.5 )
     K_d_ext = 1.3
     F1_ext = 1.0
     F2_ext = 1.0
     # sigma_d_ext expression preserved; note we require sigma_d_ext denominators to be nonzero
     # Original: sigma_d_ext = f_ys/1.15 * required_ext_reinforcement/allowable_ext_reinforcement * ((permanent_loading+0.3*variable_loading)/ultimate_load)*1.06
-    sigma_d_ext = (f_ys_value / 1.15) * (required_ext_reinforcement / (allowable_ext_reinforcement if allowable_ext_reinforcement != 0 else 1e-12)) * ( (permanent_loading_value + 0.3 * variable_loading_value) / (ultimate_load_value if ultimate_load_value != 0 else 1e-12) ) * 1.06
-    F3_ext = 310.0 / (sigma_d_ext if sigma_d_ext != 0 else 1e-12)
+    sigma_d_ext = (f_ys_value / 1.15) * (required_ext_reinforcement / (allowable_ext_reinforcement if allowable_ext_reinforcement != 0 else 1e-12)) * ( (permanent_loading_value + 0.3 * variable_loading_value) / (ultimate_load_value if ultimate_load_value != 0 else 1e-12) ) * 1.08
+    F3_ext = ((310.0 * 1000) / (sigma_d_ext if sigma_d_ext != 0 else 1e-12)) if ((310.0 * 1000) / (sigma_d_ext if sigma_d_ext != 0 else 1e-12)) > 1.0 and ((310.0 * 1000) / (sigma_d_ext if sigma_d_ext != 0 else 1e-12)) < 2 else 1.5
+    print("sigma_d_ext, F3_ext:", sigma_d_ext, F3_ext)
 
     l_d_allowable_ext = N_ext * K_d_ext * F1_ext * F2_ext * F3_ext
     l_d_actual_ext = base_slab_length_value / effective_depth_value
     max_span_ext = l_d_allowable_ext * effective_depth_value
 
     # Internal side (preserve algebra)
-    N_int = 11 + 1.5 * np.sqrt(f_ck_value / 1000.0) * (rho_int / rho_0) + 3.2 * np.sqrt(f_ck_value / 1000.0) * ( (rho_int / rho_0 - 1) ** 1.5 )
+    N_int = 11 + 1.5 * np.sqrt(f_ck_value / 1000.0) * (rho_0 / rho_int) + 3.2 * np.sqrt(f_ck_value / 1000.0) * ( (rho_0 / rho_int - 1) ** 1.5 )
     K_d_int = 1.5
     F1_int = 1.0
     F2_int = 1.0
-    sigma_d_int = (f_ys_value / 1.15) * (required_int_reinforcement / (allowable_int_reinforcement if allowable_int_reinforcement != 0 else 1e-12)) * ( (permanent_loading_value + 0.3 * variable_loading_value) / (ultimate_load_value if ultimate_load_value != 0 else 1e-12) ) * 1.09
-    F3_int = 310.0 / (sigma_d_int if sigma_d_int != 0 else 1e-12)
+    sigma_d_int = (f_ys_value / 1.15) * (required_int_reinforcement / (allowable_int_reinforcement if allowable_int_reinforcement != 0 else 1e-12)) * ( (permanent_loading_value + 0.3 * variable_loading_value) / (ultimate_load_value if ultimate_load_value != 0 else 1e-12) ) * 1.03
+    F3_int = ((310.0 * 1000) / (sigma_d_int if sigma_d_int != 0 else 1e-12)) if ((310.0 * 1000) / (sigma_d_int if sigma_d_int != 0 else 1e-12)) > 1.0 and ((310.0 * 1000) / (sigma_d_int if sigma_d_int != 0 else 1e-12)) < 2 else 1.5
+    print("sigma_d_int, F3_int:", sigma_d_int, F3_int)
 
     l_d_allowable_int = N_int * K_d_int * F1_int * F2_int * F3_int
     l_d_actual_int = base_slab_length_value / effective_depth_value
@@ -323,23 +419,30 @@ def shear_checks(external_shear: float,
                  base_slab_width: float,
                  base_slab_length: float,
                  f_ck_value: float,
-                 k_factor: float = 2.0):
+                 k_factor: float = 0.0,
+                 ultimate_load: float = 0.0) -> Dict[str, float]:
+                 
     """
     Preserves your algebra for shear checks but converts '^' to '**' and uses valid Python operations.
     Inputs required because original used globals. All algebraic expressions are preserved.
     Note: We convert and preserve the same numeric factors you used (no approximation).
     """
+
+    # Calculate the k-factor using effective depth
+    k_factor = min(2, 1.0 + np.sqrt(0.2 / effective_depth))
+
+
     # V_ed_ext = external_shear - (effective_depth + a1) * ultimate_load  (you had external_shear-(effective_depth+a1)*ultimate_load)
     # Here the caller must supply ultimate_load if needed; to keep the same form we assume external_shear/internal_shear are already in the form you want.
-    V_ed_ext = external_shear - (effective_depth + a1) * 0  # placeholder: user should replace 0 with ultimate_load if required
-    V_ed_int = internal_shear - (effective_depth + a1) * 0
+    V_ed_ext = external_shear - (effective_depth + a1) * ultimate_load  # placeholder: user should replace 0 with ultimate_load if required
+    V_ed_int = internal_shear - (effective_depth + a1) * ultimate_load
 
     # Your V_rdc expression (converted to Python): 
     # V_rdc = 0.18/1.5 * k_factor * ((0.5 * allowable_ext_reinforcement/(effective_depth*base_slab_width))*base_slab_length/1000*100)^0.33 * 1000 * 0.144
     # Convert ^ to ** and bracket properly
+    print("allowable_ext_reinforcement:", allowable_ext_reinforcement)
     term = (0.5 * (allowable_ext_reinforcement if allowable_ext_reinforcement is not None else 0.0) / (effective_depth * base_slab_width))
-    # preserve your /1000*100 structure exactly
-    inner = (term * base_slab_length / 1000.0 * 100.0)
+    inner = (term * f_ck_value / 1000.0 * 100.0)
     V_rdc = (0.18 / 1.5) * k_factor * (inner ** 0.33) * 1000.0 * 0.144
 
     # V_rdcmin = 0.035*k_factor^1.5*(f_ck/1000)^0.5*effective_depth*base_slab_width*1000
@@ -379,12 +482,19 @@ def check_slab_row_preserve_math(row: Dict[str, Any], bar_spacing_df: pd.DataFra
     ULS = ultimate_loading(permanent_load=G, variable_load=Q, psi_factor=psi)
 
     # slab dims (preserve your exact slab_dimensions function)
-    dims = slab_dimensions(base_slab_depth=slab_depth,
-                           d_rebar=Properties["d_bar"],
-                           base_environmental_cover=Dimensions["base_environmental_cover"],
-                           base_deviation_allowance=Dimensions["base_deviation_allowance"],
-                           base_slab_length=slab_length,
-                           base_wall_thickness=Dimensions["base_wall_thickness"])
+    # current (failing) call
+    # corrected call — uses keyword args and supplies screed depth
+    dims = slab_dimensions(
+            base_slab_depth=slab_depth,
+            base_screed_depth=screed_depth,
+            d_rebar=Properties["d_bar"],
+            base_environmental_cover=Dimensions["base_environmental_cover"],
+            base_deviation_allowance=Dimensions["base_deviation_allowance"],
+            base_slab_length=slab_length,
+            base_wall_thickness=Dimensions["base_wall_thickness"],
+            )
+
+
 
     # flexural design (preserve algebra exactly)
     flex = flexural_design(ultimate_load=ULS, span=dims["effective_span_m"], effective_depth=dims["effective_depth_m"], base_slab_width=slab_width, f_ys=Properties["f_ys"], bar_spacing_df=bar_spacing_df)
@@ -403,15 +513,16 @@ def check_slab_row_preserve_math(row: Dict[str, Any], bar_spacing_df: pd.DataFra
         permanent_loading_value=G,
         variable_loading_value=Q,
         ultimate_load_value=ULS,
-        base_slab_length_value=Dimensions["base_slab_length"],
+        base_slab_length_value=slab_length,   # ✅ CORRECT (actual span)
         effective_depth_value=dims["effective_depth_m"]
-    )
+        )
+
 
     # shear checks: pass the external/internal shear from flex block
     shear = shear_checks(external_shear=flex["external_shear"], internal_shear=flex["support_shear"],
                          effective_depth=dims["effective_depth_m"], a1=dims["a1_m"],
                          allowable_ext_reinforcement=flex["allowable_ext_reinforcement"] if flex["allowable_ext_reinforcement"] is not None else 0.0,
-                         base_slab_width=slab_width, base_slab_length=slab_length, f_ck_value=Properties["f_ck"])
+                         base_slab_width=slab_width, base_slab_length=slab_length, f_ck_value=Properties["f_ck"], ultimate_load=ULS)
 
     # assemble and return
     return {
