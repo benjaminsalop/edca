@@ -1,5 +1,12 @@
 import math
 
+'''
+This module provides unit conversion factors between Imperial and Metric systems.
+It includes functions to convert lengths, pressures, densities, and areas. 
+Over time, every conversion factor used in the EDCA Tool should be centralized here for consistency and easy access.
+Each function takes a value in an imperial or metric unit and returns the equivalent value in the corresponding unit, where each unit is named by its abbreviated notation.
+'''
+
 # Imperial to Metric Conversion Factors
 
 def in_to_mm(inches: float) -> float:
