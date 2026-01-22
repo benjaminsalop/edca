@@ -1,0 +1,29 @@
+# EPD Registry YAML
+
+# This YAML file contains a registry of Environmental Product Declarations (EPDs) and their associated Global Warming Potential (GWP) factors for the A1-A3 life cycle stages. 
+# For each pre-provided EPD uploaded to the inputs/epds directory, an entry here is created incorporating metadata, supplier information, properties, and carbon factors.
+# This registry allows the EDCA tool to easily reference and utilize EPD data for embodied carbon calculations without having to parse individual EPD documents during runtime.
+
+# A sample function calling to retrieve EPD data might look like:
+# epd_data = load_epd_registry('edca_tool/inputs/source/presets/yaml/epd_registry.yaml')
+
+meta:
+  dataset: "EPD Registry"
+  version: 0.1
+  description: >-
+    Registry of EPD documents and associated A1-A3 GWP factors.
+
+# Store EPD files under inputs/epds/<epd_id>/... and reference here.
+epds:
+  example_epd_id:
+    material_id: concrete
+    producer: "Example Producer"
+    product: "C32/40 ready-mix"
+    region: UK
+    declared_unit: m3
+    scope: A1-A3
+    factors:
+      kgco2e_per_declared_unit: 250
+    file_paths:
+      - "inputs/epds/example_epd_id/epd.pdf"
+    source_id: epd_example
