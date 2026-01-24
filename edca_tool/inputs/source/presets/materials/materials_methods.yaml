@@ -1,0 +1,60 @@
+# This yaml file defines how to interpret material data for the materials dataset. It ranks
+# which columns to use for cost and environmental impact (ec) based on material type,
+# and specifies how to convert between different units (per-kg, per-m3, per
+# -m2) using density and thickness where needed.
+
+# This file is used by the EDCA tool to standardize material data inputs.
+# It will be called in the following format:
+# from edca_tool.inputs.source.presets.materials import materials_methods
+# methods = materials_methods.load_materials_methods()
+
+# The 'methods' variable will contain the parsed YAML data as a Python dictionary.
+
+meta:
+  dataset: materials
+  version: 0.1
+  description: >-
+    Rules for interpreting material rows: which fields to use, fallbacks, and
+    how to convert between per-kg / per-m3 / per-m2 intensities.
+
+# Define how to compute missing intensities when you have density or thickness.
+conversions:
+  # If you have kgCO2e/m3 and density, you can convert to kgCO2e/kg.
+  # If you have kgCO2e/m2 and thickness + density, you can convert to per-m3 or per-kg.
+  requires:
+    density_kg_per_m3: [concrete, steel, rebar, clt]
+
+methods:
+  concrete:
+    # Order of preference when multiple columns exist.
+    cost_priority: [cost_per_m3, cost_per_kg, cost_per_m2]
+    carbon_priority: [ec_per_m3, ec_per_kg, ec_per_m2]
+    density_fallback_kg_per_m3: 2400
+
+  structural_steel:
+    cost_priority: [cost_per_kg, cost_per_m3]
+    carbon_priority: [ec_per_kg, ec_per_m3]
+    density_fallback_kg_per_m3: 7850
+
+  rebar:
+    cost_priority: [cost_per_kg]
+    carbon_priority: [ec_per_kg]
+    density_fallback_kg_per_m3: 7850
+
+  clt:
+    cost_priority: [cost_per_m3, cost_per_m2, cost_per_kg]
+    carbon_priority: [ec_per_m3, ec_per_m2, ec_per_kg]
+    density_fallback_kg_per_m3: 470
+
+validation:
+  required_fields_minimum:
+    - material_id
+    - material_class
+    - source_id
+    - standard_or_grade
+  numeric_nonnegative:
+    - cost_per_kg
+    - cost_per_m3
+    - ec_per_kg
+    - ec_per_m3
+    - ec_per_m2
