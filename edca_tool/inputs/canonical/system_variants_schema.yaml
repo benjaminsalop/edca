@@ -1,0 +1,63 @@
+name: system_variants
+columns:
+  system_variant:
+    type: string
+    units: ''
+  system_family:
+    type: string
+    units: ''
+  slab_depth:
+    type: number
+    units: ''
+  beam_depth:
+    type: number
+    units: ''
+  screed_depth:
+    type: number
+    units: ''
+  steel_depth:
+    type: number
+    units: ''
+  swt:
+    type: number
+    units: ''
+  sdl:
+    type: number
+    units: ''
+  ll:
+    type: number
+    units: ''
+  max_span:
+    type: number
+    units: ''
+  concrete_volume:
+    type: number
+    units: ''
+  steel_volume:
+    type: number
+    units: ''
+  timber_volume:
+    type: number
+    units: ''
+  material_concrete_id:
+    type: string
+    units: ''
+  material_pt_id:
+    type: string
+    units: ''
+  material_steel_id:
+    type: string
+    units: ''
+  material_timber_id:
+    type: string
+    units: ''
+  ebc_mm:
+    type: number
+    units: ''
+  beam_ref:
+    type: string
+    units: ''
+  source:
+    type: number
+    units: ''
+notes: Auto-generated basic schema. Please add units & refine types.
