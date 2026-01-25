@@ -1,4 +1,4 @@
-﻿material_id,family,standard/grade,concrete_psi,steel_fy,steel_fu,density_kg_per_m3,unit,ec_a1a3_per_m3,ec_a1a3_per_kg,ec_a4_per_ton_km,transport_km,ec_a5_per_kg,cost_per_m3,cost_per_kg,source
+﻿material_id,family,standard_grade,concrete_psi,steel_fy,steel_fu,density_kg_per_m3,unit,ec_a1a3_per_m3,ec_a1a3_per_kg,ec_a4_per_ton_km,transport_km,ec_a5_per_kg,cost_per_m3,cost_per_kg,source
 concrete,concrete,,4000,,,2400,metric,330,0.138,0.06,50,0.005,120,0.05,
 pt,steel,,,,,7850,metric,,2,0.06,200,0.02,0.000318471,2.5,
 steel,steel,,,50,,7850,metric,,2,0.06,200,0.02,0.000254777,2,
