@@ -1,13 +1,18 @@
-# src/edtool/db/schemas.py
-from typing import Optional, List, Dict
-from pydantic import BaseModel, Field, validator, HttpUrl
+from __future__ import annotations
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field, validator, HttpUrl, root_validator
+import math
+
+# -----------------------
+# Occupancy
+# -----------------------
 
 class Occupancy(BaseModel):
     use: str
     unit: Optional[str] = None
-    sdl: Optional[float] = None         # superimposed dead load (kN/m2 or as defined)
+    sdl: float
     sdl_partition: Optional[float] = None
-    ll: Optional[float] = None          # live load (kN/m2)
+    ll: float
     code: Optional[str] = None
     notes: Optional[str] = None
 
@@ -15,14 +20,23 @@ class Occupancy(BaseModel):
     def empty_to_none_float(cls, v):
         if v == "" or v is None:
             return None
-        return float(v)
+        try:
+            return float(v)
+        except Exception:
+            return None
 
+# -----------------------
+# Material
+# -----------------------
 class Material(BaseModel):
     material_id: str
     family: Optional[str] = None
+    standard_grade: Optional[float] = None
     concrete_psi: Optional[float] = None
-    steel_ksi: Optional[float] = None
-    density_kg_per_m3: Optional[float] = None
+    steel_fy: Optional[float] = None
+    steel_fu: Optional[float] = None
+    density_kg_per_m3: float
+    unit: str
     ec_a1a3_per_m3: Optional[float] = None
     ec_a1a3_per_kg: Optional[float] = None
     ec_a4_per_ton_km: Optional[float] = None
@@ -30,10 +44,12 @@ class Material(BaseModel):
     ec_a5_per_kg: Optional[float] = None
     cost_per_m3: Optional[float] = None
     cost_per_kg: Optional[float] = None
+    source: Optional[str] = None      # link to sources.yaml / epd_registry
 
     @validator(
         "concrete_psi",
-        "steel_ksi",
+        "steel_fy",
+        "steel_fu",
         "density_kg_per_m3",
         "ec_a1a3_per_m3",
         "ec_a1a3_per_kg",
@@ -43,11 +59,16 @@ class Material(BaseModel):
         "cost_per_m3",
         "cost_per_kg",
         pre=True,
-    )
+        always=False
+        )
+
     def empty_to_none_float(cls, v):
         if v == "" or v is None:
             return None
-        return float(v)
+        try:
+            return float(v)
+        except Exception:
+            return None
 
     @validator("ec_a1a3_per_m3", always=True)
     def fill_a1a3_per_m3_from_per_kg(cls, v, values):
@@ -55,42 +76,140 @@ class Material(BaseModel):
         if v is None and values.get("ec_a1a3_per_kg") is not None and values.get("density_kg_per_m3") is not None:
             return values["ec_a1a3_per_kg"] * values["density_kg_per_m3"]
         return v
+    
+    @validator("cost_per_m3", always=True)
+    def cost_per_m3_from_per_kg(cls, v, values):
+        # If per_m3 missing but per_kg + density exist, compute per_m3
+        if v is None and values.get("cost_per_kg") is not None and values.get("density_kg_per_m3") is not None:
+            return values["cost_per_kg"] * values["density_kg_per_m3"]
+        return v
 
-class SystemRow(BaseModel):
-    component: Optional[str] = None
-    system_id: str
+    @validator("concrete_psi", "steel_fy", "steel_fu", "density_kg_per_m3", "transport_km", "cost_per_m3", "cost_per_kg")
+    def non_negative(cls, v):
+        if v is None:
+            return None
+        if v < 0:
+            raise ValueError("must be non-negative")
+        return v
+
+# -----------------------
+# Source / EPD metadata
+# -----------------------
+class Source(BaseModel):
+    type: Optional[str] = None          # 'epd' | 'datasheet' | 'book' | 'assumption'
+    source: str
+    specification_id: str
+    citation: Optional[str] = None
+    url: Optional[str] = None
+    published: Optional[str] = None     # ISO date string
+    region: Optional[str] = None        # e.g. 'UK', 'EU',
+
+# -----------------------
+# SystemFamily (catalog-level)
+# -----------------------
+class SystemFamily(BaseModel):
+    system_family: str             # canonical family id (was system_id)
+    component: str
     category: Optional[str] = None
-    type: Optional[str] = None
+    type: str
     span_behavior: Optional[str] = None
     manufacturer: Optional[str] = None
-    unit: Optional[str] = None
-    length: Optional[float] = None
+    unit: str
     width: Optional[float] = None
-    slab_depth: Optional[float] = None
+    material_concrete_id: Optional[str] = None
+    material_steel_id: Optional[str] = None
+    material_timber_id: Optional[str] = None
+    source: Optional[str] = None
+    notes: Optional[str] = None
+
+# -----------------------
+# SystemVariant (performance row)
+# -----------------------
+class SystemVariant(BaseModel):
+    system_variant: str
+    system_family: str
+    slab_depth: float
     beam_depth: Optional[float] = None
     screed_depth: Optional[float] = None
     steel_depth: Optional[float] = None
-    swt: Optional[float] = None
-    sdl: Optional[float] = None
-    ll: Optional[float] = None
-    max_span: Optional[float] = None
+    swt: float
+    sdl: float
+    ll: float
+    max_span: float
+    concrete_volume: Optional[float] = None   # m3 per m2 (or per unit area) — document units in schema yaml
+    steel_volume: Optional[float] = None
+    timber_volume: Optional[float] = None
     material_concrete_id: Optional[str] = None
     material_pt_id: Optional[str] = None
     material_steel_id: Optional[str] = None
     material_timber_id: Optional[str] = None
     ebc_mm: Optional[float] = None
     beam_ref: Optional[str] = None
-    concrete_volume: Optional[float] = None
-    steel_volume: Optional[float] = None
-    timber_volume: Optional[float] = None
-    total_depth: Optional[float] = None
+    source: Optional[str] = None
+    notes: Optional[str] = None
 
+    # numeric coercion + non-negative checks
     @validator(
-        "length", "width", "slab_depth", "beam_depth", "screed_depth", "steel_depth",
-        "swt", "sdl", "ll", "max_span", "ebc_mm", "concrete_volume", "steel_volume",
-        "timber_volume", "total_depth", pre=True
+        "slab_depth", "beam_depth", "screed_depth", "steel_depth",
+        "swt", "sdl", "ll", "max_span", "concrete_volume", "steel_volume", "timber_volume",
+        pre=True
     )
-    def empty_to_none_float(cls, v):
+    def coerce_to_float_or_none(cls, v):
         if v == "" or v is None:
             return None
-        return float(v)
+        try:
+            f = float(v)
+            if isinstance(f, float) and math.isnan(f):
+                return None
+            return f
+        except Exception:
+            return None
+
+    @validator("max_span")
+    def max_span_positive(cls, v):
+        if v is None:
+            return None
+        if v <= 0:
+            raise ValueError("max_span must be > 0")
+        return v
+
+    # helpers that use material lookup (material_lookup must be dict material_id->Material)
+    def concrete_mass_per_m2(self, material_lookup: Dict[str, Material]) -> Optional[float]:
+        if self.concrete_volume is None:
+            return None
+        mat_id = self.material_concrete_id
+        if not mat_id:
+            return None
+        mat = material_lookup.get(mat_id)
+        if mat is None or mat.density_kg_per_m3 is None:
+            return None
+        return float(self.concrete_volume) * float(mat.density_kg_per_m3)
+
+    def embodied_carbon_a1a3_per_m2(self, material_lookup: Dict[str, Material]) -> Optional[float]:
+        total = 0.0
+        any_known = False
+        cm = self.concrete_mass_per_m2(material_lookup)
+        if cm is not None:
+            mat = material_lookup.get(self.material_concrete_id)
+            if mat and mat.ec_a1a3_per_kg is not None:
+                total += cm * float(mat.ec_a1a3_per_kg)
+                any_known = True
+        # steel
+        if self.steel_volume is not None:
+            mat = material_lookup.get(self.material_steel_id)
+            if mat and mat.density_kg_per_m3 is not None and mat.ec_a1a3_per_kg is not None:
+                steel_mass = float(self.steel_volume) * float(mat.density_kg_per_m3)
+                total += steel_mass * float(mat.ec_a1a3_per_kg)
+                any_known = True
+        # timber
+        if self.timber_volume is not None:
+            mat = material_lookup.get(self.material_timber_id)
+            if mat and mat.density_kg_per_m3 is not None and mat.ec_a1a3_per_kg is not None:
+                timber_mass = float(self.timber_volume) * float(mat.density_kg_per_m3)
+                total += timber_mass * float(mat.ec_a1a3_per_kg)
+                any_known = True
+
+        return total if any_known else None
+
+# IMPORTANT: forward refs for methods that reference other models
+SystemVariant.update_forward_refs()
