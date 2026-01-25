@@ -31,7 +31,7 @@ class Occupancy(BaseModel):
 class Material(BaseModel):
     material_id: str
     family: Optional[str] = None
-    standard_grade: Optional[float] = None
+    standard_grade: Optional[str] = None
     concrete_psi: Optional[float] = None
     steel_fy: Optional[float] = None
     steel_fu: Optional[float] = None
