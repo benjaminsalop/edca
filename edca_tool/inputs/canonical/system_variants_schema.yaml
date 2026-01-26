@@ -60,4 +60,7 @@ columns:
   source:
     type: number
     units: ''
+  notes:
+    type: number
+    units: ''
 notes: Auto-generated basic schema. Please add units & refine types.

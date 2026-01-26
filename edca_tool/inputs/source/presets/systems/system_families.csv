@@ -241,4 +241,4 @@ vulcraft_formlok_dovetail_lw_2.0,floor,composite,composite_deck,one-way,Vulcraft
 vulcraft_formlok_dovetail_lw_3.5,floor,composite,composite_deck,one-way,Vulcraft,imperial,1,,,,,
 vulcraft_formlok_dovetail_nw_2.0,floor,composite,composite_deck,one-way,Vulcraft,imperial,1,,,,,
 vulcraft_formlok_dovetail_nw_3.5,floor,composite,composite_deck,one-way,Vulcraft,imperial,1,,,,,
-,floor,concrete,cast_slab,two-way,,,,,,,,
+cast_in_place,floor,concrete,cast_slab,two-way,cast_in_place,imperial,,,,,,

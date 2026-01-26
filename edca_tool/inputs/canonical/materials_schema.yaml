@@ -6,7 +6,7 @@ columns:
   family:
     type: string
     units: ''
-  standard/grade:
+  standard_grade:
     type: number
     units: ''
   concrete_psi:
