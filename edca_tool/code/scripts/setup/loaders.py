@@ -1,7 +1,8 @@
-# src/edtool/db/loaders.py
+# edca_tool/code/scripts/setup/loaders.py
 from pathlib import Path
 import pandas as pd
 from typing import Dict, Tuple, List
+import numpy as np
 
 from .schemas import (
     Material,
@@ -10,11 +11,12 @@ from .schemas import (
     SystemVariant,
 )
 
-CANONICAL = Path("inputs/canonical")
+CANONICAL = Path("edca_tool/inputs/canonical")
 
 def _load_parquet_or_csv(name: str) -> pd.DataFrame:
     pq = CANONICAL / f"{name}.parquet"
     csv = CANONICAL / f"{name}.cleaned.csv"
+
     if pq.exists():
         return pd.read_parquet(pq)
     if csv.exists():
@@ -25,6 +27,11 @@ def load_materials() -> Tuple[Dict[str, Material], List[str]]:
     df = _load_parquet_or_csv("materials")
     materials = {}
     errors = []
+
+    df = df.astype(object)
+    df = df.where(pd.notnull(df), None)
+    df = df.replace({np.nan: None})
+
 
     for i, row in df.iterrows():
         try:
@@ -40,10 +47,14 @@ def load_system_families() -> Tuple[Dict[str, SystemFamily], List[str]]:
     families = {}
     errors = []
 
+    df = df.astype(object)
+    df = df.where(pd.notnull(df), None)
+    df = df.replace({np.nan: None})
+
     for i, row in df.iterrows():
         try:
             f = SystemFamily(**row.to_dict())
-            families[f.system_family_id] = f
+            families[f.system_family] = f
         except Exception as e:
             errors.append(f"system_families row {i}: {e}")
 
@@ -53,6 +64,10 @@ def load_system_variants() -> Tuple[Dict[str, SystemVariant], List[str]]:
     df = _load_parquet_or_csv("system_variants")
     variants = {}
     errors = []
+
+    df = df.astype(object)
+    df = df.where(pd.notnull(df), None)
+    df = df.replace({np.nan: None})
 
     for i, row in df.iterrows():
         try:

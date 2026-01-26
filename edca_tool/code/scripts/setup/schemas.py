@@ -10,9 +10,9 @@ import math
 class Occupancy(BaseModel):
     use: str
     unit: Optional[str] = None
-    sdl: float
+    sdl: Optional[float] = None
     sdl_partition: Optional[float] = None
-    ll: float
+    ll: Optional[float] = None
     code: Optional[str] = None
     notes: Optional[str] = None
 
@@ -35,8 +35,8 @@ class Material(BaseModel):
     concrete_psi: Optional[float] = None
     steel_fy: Optional[float] = None
     steel_fu: Optional[float] = None
-    density_kg_per_m3: float
-    unit: str
+    density_kg_per_m3: Optional[float] = None
+    unit: Optional[str] = None
     ec_a1a3_per_m3: Optional[float] = None
     ec_a1a3_per_kg: Optional[float] = None
     ec_a4_per_ton_km: Optional[float] = None
@@ -98,7 +98,7 @@ class Material(BaseModel):
 class Source(BaseModel):
     type: Optional[str] = None          # 'epd' | 'datasheet' | 'book' | 'assumption'
     source: str
-    specification_id: str
+    specification_id: Optional[str] = None
     citation: Optional[str] = None
     url: Optional[str] = None
     published: Optional[str] = None     # ISO date string
@@ -109,12 +109,12 @@ class Source(BaseModel):
 # -----------------------
 class SystemFamily(BaseModel):
     system_family: str             # canonical family id (was system_id)
-    component: str
+    component: Optional[str] = None
     category: Optional[str] = None
-    type: str
+    type: Optional[str] = None
     span_behavior: Optional[str] = None
     manufacturer: Optional[str] = None
-    unit: str
+    unit: Optional[str] = None
     width: Optional[float] = None
     material_concrete_id: Optional[str] = None
     material_steel_id: Optional[str] = None
@@ -126,16 +126,16 @@ class SystemFamily(BaseModel):
 # SystemVariant (performance row)
 # -----------------------
 class SystemVariant(BaseModel):
-    system_variant: str
-    system_family: str
-    slab_depth: float
+    system_variant: Optional[str] = None    # specific variant id (was system_variant_id)
+    system_family: Optional[str] = None
+    slab_depth: Optional[float] = None
     beam_depth: Optional[float] = None
     screed_depth: Optional[float] = None
     steel_depth: Optional[float] = None
-    swt: float
-    sdl: float
-    ll: float
-    max_span: float
+    swt: Optional[float] = None
+    sdl: Optional[float] = None
+    ll: Optional[float] = None
+    max_span: Optional[float] = None
     concrete_volume: Optional[float] = None   # m3 per m2 (or per unit area) — document units in schema yaml
     steel_volume: Optional[float] = None
     timber_volume: Optional[float] = None
