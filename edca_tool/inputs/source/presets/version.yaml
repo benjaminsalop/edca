@@ -1,9 +1,0 @@
-version: "0.2.0"
-date: "2026-01-19"
-author: "Benjamin Salop"
-sources:
-  systems_catalog: "systems.csv"
-  materials: "materials.csv"
-  occupancies: "occupancies.csv"
-notes: >
-  Pre-release redesign of the EDCA tool, restructuring architecture and workflow for improved usability and performance.
