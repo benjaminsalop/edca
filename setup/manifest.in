@@ -1,0 +1,2 @@
+recursive-include edca/inputs *.yaml *.yml *.csv *.parquet
+recursive-include edca/setup/control_files *.yaml *.yml

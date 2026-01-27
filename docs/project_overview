@@ -1,0 +1,63 @@
+/project_root
+├─ README.md
+├─ LICENSE
+├─ pyproject.toml
+├─ setup.cfg
+├─ .gitignore
+├─ Makefile                       # optional but recommended
+├─ .github/                        # optional but recommended
+│  └─ workflows/
+│     └─ ci.yml
+├─ setup/
+│  ├─ pyproject.toml               # optional
+│  └─ setup.cfg                    # optional
+├─ docs/
+│  ├─ architecture.md              # optional
+│  ├─ control_file.md              # optional
+│  └─ ml_dataset_schema.md         # optional
+├─ src/
+│  └─ edca_tool/
+│     ├─ __init__.py
+│     ├─ api.py                    # optional (recommended)
+│     ├─ run_edca.py               # optional CLI entrypoint (recommended)
+│     ├─ config.py                 # optional (recommended)
+│     ├─ units.py                  # (your unit_conversions logic ends up here)
+│     ├─ constants/
+│     │  ├─ __init__.py
+│     │  └─ rebar_properties.py    # (moved from code/constants)
+│     ├─ db/
+│     │  └─ schemas.py             # (moved from inputs/schemas.py)
+│     ├─ scripts/
+│     │  ├─ carbon.py  
+│     │  ├─ systems.py  
+│     │  ├─ loads.py  
+│     │  ├─ carbon.py  
+│     │  ├─ validate.py  
+├─ notebooks/
+│  └─ exploration.ipynb            # (moved out of code/notebooks when ready)
+├─ inputs/
+│  ├─ source/
+│  │  ├─ control_files/
+│  │  │  ├─ control_file.yaml      # recommend: primary “truth”
+│  │  │  ├─ control_file.csv       # optional derivative
+│  │  │  └─ control_file.txt       # optional derivative
+│  │  ├─ presets/
+│  │  │  ├─ csvs/
+│  │  │  │  ├─ materials.csv
+│  │  │  │  ├─ occupancies.csv
+│  │  │  │  └─ systems.csv
+│  │  │  ├─ yaml/
+│  │  │  │  ├─ loads.yaml
+│  │  │  │  └─ version.yaml
+│  │  │  └─ epds/
+│  │  └─ examples/                 # optional (OK where it is)
+│  └─ canonical/
+│     ├─ materials.parquet         # generated
+│     ├─ occupancies.parquet       # generated
+│     └─ systems_catalog.parquet   # generated
+└─ tests/
+   └─ unit/
+     ├─ test_building.py
+     ├─ test_carbon.py
+     ├─ test_loads.py
+     └─ test_systems.py

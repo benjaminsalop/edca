@@ -1,3 +1,19 @@
+Metadata-Version: 2.4
+Name: edca-code
+Version: 0.1.0
+Summary: Early Design Carbon Assessment Tool
+Author: Benjamin Salop
+License: MIT
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: pyyaml
+Requires-Dist: pydantic
+Requires-Dist: pyarrow
+Dynamic: license-file
+
 # edca
 Early Design Embodied Cost and Carbon Tool
 

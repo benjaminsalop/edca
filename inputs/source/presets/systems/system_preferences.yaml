@@ -1,0 +1,40 @@
+# The system_preferences.yaml file defines ranking and filtering rules for selecting systems based on typologies. 
+# For each sample typology defined in typologies.yaml, there are corresponding rules that specify how to filter and rank systems for specific components.
+# A default classification of systems based on typology and component is provided, along with filtering criteria and ranking fields with directions.
+# This structure allows for tailored system selection that aligns with the intended design and performance goals of different building typologies.
+
+meta:
+  dataset: system_preferences
+  version: 0.1
+  description: >-
+    Ranking and filtering rules for selecting systems given a typology.
+
+rules:
+  - name: default_floor_selection
+    when:
+      typology: midrise_concrete_residential
+      component: floor
+    filters:
+      unit: metric
+      category: [concrete, precast]
+    rank:
+      # ascending = lower is better
+      - field: embodied_carbon
+        direction: asc
+      - field: cost
+        direction: asc
+      - field: depth
+        direction: asc
+
+  - name: warehouse_roof
+    when:
+      typology: industrial_steel_warehouse
+      component: roof
+    filters:
+      category: steel
+      type: metal_deck
+    rank:
+      - field: cost
+        direction: asc
+      - field: depth
+        direction: asc

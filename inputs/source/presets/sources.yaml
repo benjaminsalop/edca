@@ -1,0 +1,44 @@
+# This file contains a registry of data sources for materials and systems.
+
+# For each EPD or carbon/cost database used, create an entry here with a unique id, 
+# following the placeholder example below. Each entry should include the type of source, 
+# a specification identifier, citation details, and optional fields for URL, publication date, and region.
+# The "id" field should match the "source" field in the corresponding material or system
+# definition files. This allows for easy reference and management of data sources. Doing so 
+# allows the EDCA tool to track where data comes from and ensure consistency across materials and systems; 
+# it also ensures reports can document the sources used clearly, and double-check any overlaps or gaps in data coverage.
+
+
+meta:
+  version: 0.1
+  description: >-
+    Registry of data sources used by materials and systems rows.
+    CSV rows in system_families.csv should correspond to an id (in the column "system_family") from here.
+
+sources:
+  placeholder_assumption:
+    type: assumption
+    specification_id: "internal_placeholder"
+    citation: "Internal placeholder (replace with EPD/datasheet)."
+    url: null
+    published: null
+    region: null
+
+  # Example entries (replace with your real sources)
+  ice_v3:
+    type: database
+    source: "ice_v3"
+    specification_id: "ice_material_data"
+    citation: "Inventory of Carbon & Energy (ICE) v3"
+    url: null
+    published: null
+    region: global
+
+  epd_example:
+    type: epd
+    source: "example_epd_database"
+    specification_id: "cast_in_place_concrete_epd_example"
+    citation: "Example EPD (replace)"
+    url: null
+    published: null
+    region: null

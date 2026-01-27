@@ -1,0 +1,35 @@
+# This file defines system types, categories, components, and aliases for use in the EDCA tool. It converts the taxonomy 
+# found in systems.csv and underlying files into a structured YAML format for consistency across the tool. When the tool needs to 
+# reference system types, it will use this file to ensure uniform naming and categorization in classification.
+
+meta:
+  dataset: system_types
+  version: 0.1
+  description: >-
+    Taxonomy for systems catalogs: categories, components, and type aliases.
+    Use this to keep naming consistent across CSVs.
+
+components:
+  - floor
+  - roof
+  - beam
+  - column
+  - wall
+  - foundation
+
+categories:
+  precast:
+    types: [hollowcore, solid_plank, double_tee, beam_block, plank, solid_plank]
+  steel:
+    types: [composite_deck, metal_deck]
+  concrete:
+    types: [flat_slab, pt_slab, beam_slab]
+  timber:
+    types: [lvl_joist, lvl_panel, clt_floor, glulam_beam]
+
+aliases:
+  # If your CSV uses multiple labels for the same thing
+  hollow_core: hollowcore
+  flat_plate: flat_slab
+  clt_floor: 
+  cast_slab: flat_slab

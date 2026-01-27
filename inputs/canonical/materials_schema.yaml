@@ -1,0 +1,48 @@
+name: materials
+columns:
+  material_id:
+    type: string
+    units: ''
+  family:
+    type: string
+    units: ''
+  standard_grade:
+    type: number
+    units: ''
+  concrete_f_ck:
+    type: number
+    units: ''
+  steel_fy:
+    type: number
+    units: ''
+  steel_fu:
+    type: number
+    units: ''
+  density:
+    type: number
+    units: ''
+  unit:
+    type: string
+    units: ''
+  ec_a1a3_volumetric:
+    type: number
+    units: ''
+  ec_a1a3_mass:
+    type: number
+    units: ''
+  ec_a4_ton_km:
+    type: number
+    units: ''
+  transport_distance:
+    type: number
+    units: ''
+  ec_a5_mass:
+    type: number
+    units: ''
+  cost_volume:
+    type: number
+    units: ''
+  cost_mass:
+    type: number
+    units: ''
+notes: Auto-generated basic schema. Please add units & refine types.

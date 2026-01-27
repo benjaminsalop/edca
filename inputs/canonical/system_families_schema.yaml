@@ -1,0 +1,42 @@
+name: system_families
+columns:
+  system_family:
+    type: string
+    units: ''
+  component:
+    type: string
+    units: ''
+  category:
+    type: string
+    units: ''
+  type:
+    type: string
+    units: ''
+  span_behavior:
+    type: number
+    units: ''
+  manufacturer:
+    type: string
+    units: ''
+  unit:
+    type: string
+    units: ''
+  width:
+    type: number
+    units: ''
+  material_concrete_id:
+    type: number
+    units: ''
+  material_steel_id:
+    type: number
+    units: ''
+  material_timber_id:
+    type: string
+    units: ''
+  source:
+    type: number
+    units: ''
+  notes:
+    type: number
+    units: ''
+notes: Auto-generated basic schema. Please add units & refine types.
