@@ -1,0 +1,46 @@
+# This file defines building typologies with their default selections and constraints.
+# Alongside the materials and systems catalogs, typologies help streamline the design process, by establishing common configurations.
+# The default typologies listed below will cover a range of typical building types, and can be customized or extended as needed.
+# A typology can allow engineers to easily select a pre-defined set of materials and systems that align with their project's intent, 
+# allowing them to rapidly prototype and evaluate different design options.
+
+# In code files, typologies can be called as follows:
+# from edca.inputs.source.presets.systems.typologies import typologies
+# Then access a specific typology by its key, e.g., typologies['midrise_concrete_residential']
+# This will return the dictionary of defaults, constraints, and preferences for that typology.
+# Users can then use this information to guide their design selections and analyses.
+
+
+meta:
+  dataset: typologies
+  version: 0.1
+  description: >-
+    Typologies describe structural intent and default selections.
+    They reference IDs in materials and systems catalogs.
+
+typologies:
+  # Example typology
+  midrise_concrete_residential:
+    description: "Concrete frame with flat slab / cores; residential loading."
+    defaults:
+      # IDs from your materials + material_sets
+      material_set: uk_default_2025
+      # IDs from systems (family ids, not variant ids)
+      floor_system_family: flat_slab
+      lateral_system_family: rc_core
+      foundation_system_family: pad_footings
+    constraints:
+      max_story_count: 12
+      spans_m:
+        typical: [6, 9]
+    preferences:
+      rank_by: [embodied_carbon, cost, depth]
+
+  industrial_steel_warehouse:
+    description: "Steel portal/frames with metal deck."
+    defaults:
+      material_set: uk_default_2025
+      floor_system_family: composite_deck
+      lateral_system_family: braced_frame
+    constraints:
+      max_story_count: 2
