@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edca-code"
+version = "0.1.0"
+description = "Early Design Carbon Assessment Tool"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "Benjamin Salop" }
+]
+
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "pydantic",
+    "pyarrow"
+]
+
+[project.scripts]
+edca = "edca_code.scripts.core.run_edca:main"
+
+# --- Tooling (optional but recommended) ---
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
