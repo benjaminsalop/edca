@@ -1,4 +1,4 @@
-from edca_tool.code.scripts.setup.loaders import (
+from edca_code.scripts.setup.loaders import (
     load_materials,
     load_system_families,
     load_system_variants,

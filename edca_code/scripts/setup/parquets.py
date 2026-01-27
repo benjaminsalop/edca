@@ -12,8 +12,8 @@ from pathlib import Path
 import yaml
 
 PROJECT_ROOT = Path(".")
-SOURCE_DIR = PROJECT_ROOT / "edca_tool" / "inputs" / "source"
-CANONICAL_DIR = PROJECT_ROOT / "edca_tool" / "inputs" / "canonical"
+SOURCE_DIR = PROJECT_ROOT / "inputs" / "source"
+CANONICAL_DIR = PROJECT_ROOT / "inputs" / "canonical"
 CANONICAL_DIR.mkdir(parents=True, exist_ok=True)
 
 csv_files = {

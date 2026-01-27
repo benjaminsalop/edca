@@ -1,4 +1,4 @@
-# edca_tool/code/scripts/setup/loaders.py
+#edca_code/scripts/setup/loaders.py
 from pathlib import Path
 import pandas as pd
 from typing import Dict, Tuple, List
@@ -11,7 +11,7 @@ from .schemas import (
     SystemVariant,
 )
 
-CANONICAL = Path("edca_tool/inputs/canonical")
+CANONICAL = Path("inputs/canonical")
 
 def _load_parquet_or_csv(name: str) -> pd.DataFrame:
     pq = CANONICAL / f"{name}.parquet"
@@ -102,7 +102,7 @@ def validate_relationships(
 if __name__ == "__main__":
     # Import loader functions (absolute import to be safe)
     try:
-        from edca_tool.code.scripts.setup.loaders import (
+        from edca_code.scripts.setup.loaders import (
             load_materials,
             load_system_families,
             load_system_variants,
