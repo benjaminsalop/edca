@@ -33,6 +33,9 @@ def in2_to_mm2(inches2: float) -> float:
 def ft2_to_m2(feet2: float) -> float:
     return feet2 * 0.092903
 
+def pcf_to_kN_m3(pcf: float) -> float:
+    return kgm3_to_kN_m3(pcf_to_kgm3(pcf))
+
 # Metric to Imperial Conversion Factors
 
 def mm_to_inches(mm: float) -> float:
@@ -59,10 +62,23 @@ def mm2_to_in2(mm2: float) -> float:
 def m2_to_ft2(m2: float) -> float:
     return m2 / 0.092903
 
+# Metric Conversions
+def kgm3_to_kN_m3(kgm3: float) -> float:
+    return float(kgm3) * G / 1000.0
+
+def psi_to_MPa(psi: float) -> float:
+    return float(psi) * 0.00689476
+
+def ksi_to_MPa(ksi: float) -> float:
+    return float(ksi) * 6.89476
+
 # Additional Conversions
 def ton_km_to_lb_mile(ton_km: float) -> float:
     return ton_km * 0.000556
 
 def lb_mile_to_ton_km(lb_mile: float) -> float:
     return lb_mile / 0.000556
+
+
+
 

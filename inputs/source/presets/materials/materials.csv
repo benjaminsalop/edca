@@ -1,5 +1,6 @@
 ﻿material_id,family,standard_grade,concrete_f_ck,steel_fy,steel_fu,density,unit,ec_a1a3_volumetric,ec_a1a3_mass,ec_a4_ton_km,transport_distance,ec_a5_mass,cost_volume,cost_mass
-concrete,concrete,,4000,,,2400,metric,330,0.138,0.06,50,0.005,120,0.05
+concrete,concrete,,40,,,24,metric,330,0.138,0.06,50,0.005,120,0.05
+screed,concrete,,40,,,20,metric,330,0.138,0.06,50,0.005,120,0.05
 pt,steel,,,,,7850,metric,,2,0.06,200,0.02,0.000318471,2.5
 steel,steel,,,50,,7850,metric,,2,0.06,200,0.02,0.000254777,2
 rebar,steel,,,50,,7850,metric,,2,0.06,200,0.02,0.000254777,2
@@ -18,5 +19,5 @@ pc_fpmccann,concrete,,6000,,,2400,imperial,360,0.15,0.06,100,0.005,180,0.075
 pc_creagh,concrete,,6000,,,2400,imperial,360,0.15,0.06,100,0.005,180,0.075
 pc_coreslab_orlando,concrete,,6000,,,2400,imperial,360,0.15,0.06,100,0.005,180,0.075
 pc_bison,concrete,,6000,,,2400,imperial,360,0.15,0.06,100,0.005,180,0.075
-clt,timber,,,,,520,metric,-500,-0.962,0.06,600,0.005,650,1.25
-lvl,timber,,,,,550,metric,-450,-0.818,0.06,600,0.005,900,1.636
+clt,timber,,1,,,520,metric,-500,-0.962,0.06,600,0.005,650,1.25
+lvl,timber,,1,,,550,metric,-450,-0.818,0.06,600,0.005,900,1.636

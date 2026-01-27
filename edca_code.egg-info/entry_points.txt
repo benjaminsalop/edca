@@ -1,0 +1,2 @@
+[console_scripts]
+edca = edca_code.scripts.run_edca:main

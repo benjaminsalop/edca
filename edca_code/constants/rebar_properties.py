@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 import math
 
 '''
@@ -33,6 +34,8 @@ class RebarSpec:
     diameter_unit: str        # "mm" or "in"
     spacing: float            # spacing numeric
     spacing_unit: str         # "m" or "in" (or "mm")
+    bar_number: Optional[float] = None       # optional number of bars per unit length
+    bar_number_unit: Optional[str] = None      # unit for bar_number, e.g. "per_m" or "per_ft"
     meta: dict = None
 
     @property

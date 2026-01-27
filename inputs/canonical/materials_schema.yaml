@@ -9,7 +9,7 @@ columns:
   standard_grade:
     type: number
     units: ''
-  concrete_psi:
+  concrete_f_ck:
     type: number
     units: ''
   steel_fy:
@@ -18,34 +18,31 @@ columns:
   steel_fu:
     type: number
     units: ''
-  density_kg_per_m3:
+  density:
     type: number
     units: ''
   unit:
     type: string
     units: ''
-  ec_a1a3_per_m3:
+  ec_a1a3_volumetric:
     type: number
     units: ''
-  ec_a1a3_per_kg:
+  ec_a1a3_mass:
     type: number
     units: ''
-  ec_a4_per_ton_km:
+  ec_a4_ton_km:
     type: number
     units: ''
-  transport_km:
+  transport_distance:
     type: number
     units: ''
-  ec_a5_per_kg:
+  ec_a5_mass:
     type: number
     units: ''
-  cost_per_m3:
+  cost_volume:
     type: number
     units: ''
-  cost_per_kg:
-    type: number
-    units: ''
-  source:
+  cost_mass:
     type: number
     units: ''
 notes: Auto-generated basic schema. Please add units & refine types.
