@@ -5,7 +5,7 @@
 # allowing them to rapidly prototype and evaluate different design options.
 
 # In code files, typologies can be called as follows:
-# from edca.inputs.source.presets.systems.typologies import typologies
+# from inputs.source.presets.systems.typologies import typologies
 # Then access a specific typology by its key, e.g., typologies['midrise_concrete_residential']
 # This will return the dictionary of defaults, constraints, and preferences for that typology.
 # Users can then use this information to guide their design selections and analyses.

@@ -5,7 +5,7 @@
 
 # This file is used by the EDCA tool to standardize material data inputs.
 # It will be called in the following format:
-# from edca.inputs.source.presets.materials import materials_methods
+# from inputs.source.presets.materials import materials_methods
 # methods = materials_methods.load_materials_methods()
 
 # The 'methods' variable will contain the parsed YAML data as a Python dictionary.

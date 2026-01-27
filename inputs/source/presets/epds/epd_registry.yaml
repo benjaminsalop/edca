@@ -5,7 +5,7 @@
 # This registry allows the EDCA tool to easily reference and utilize EPD data for embodied carbon calculations without having to parse individual EPD documents during runtime.
 
 # A sample function calling to retrieve EPD data might look like:
-# epd_data = load_epd_registry('edca/inputs/source/presets/yaml/epd_registry.yaml')
+# epd_data = load_epd_registry('inputs/source/presets/yaml/epd_registry.yaml')
 
 meta:
   dataset: "EPD Registry"
