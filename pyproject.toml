@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.scripts]
-edca = "edca_code.scripts.core.run_edca:main"
+edca = "edca_code.scripts.run_edca:main"
 
 # --- Tooling (optional but recommended) ---
 
