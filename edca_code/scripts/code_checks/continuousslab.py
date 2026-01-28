@@ -33,7 +33,7 @@ LOCAL_DEFAULTS = {
     "fallback_slab_width_m": 1.0
 }
 
-def _load_yaml(path: str | Path) -> dict:
+def load_yaml(path: str | Path) -> dict:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"YAML not found: {p}")
@@ -41,7 +41,7 @@ def _load_yaml(path: str | Path) -> dict:
         return yaml.safe_load(fh)
 
 
-def _choose_rebar_for_As_required(as_req_mm2_per_m: float,
+def choose_rebar_for_As_required(as_req_mm2_per_m: float,
                                   metric_only: bool = True) -> Optional[RebarSpec]:
     """
     Find the smallest standard rebar spec (area per m) in the rebar databases that
@@ -51,7 +51,7 @@ def _choose_rebar_for_As_required(as_req_mm2_per_m: float,
     """
     candidates: list[tuple[float, RebarSpec]] = []
 
-    def _spec_area_per_m(spec: RebarSpec) -> float:
+    def spec_area_per_m(spec: RebarSpec) -> float:
         # spec.area_mm2 available via RebarSpec API (assumed)
         # compute bars per m from spacing: if spacing unit is 'mm' treat spacing as mm
         try:
@@ -72,17 +72,17 @@ def _choose_rebar_for_As_required(as_req_mm2_per_m: float,
         bars_per_m = 1.0 / spacing_m if spacing_m > 0 else 0.0
         return area_single * bars_per_m
 
-    def _collect_from_dict(d: dict):
+    def collect_from_dict(d: dict):
         for spec in d.values():
             try:
-                a = _spec_area_per_m(spec)
+                a = spec_area_per_m(spec)
                 candidates.append((a, spec))
             except Exception:
                 continue
 
-    _collect_from_dict(METRIC_REBAR_BY_SPEC)
+    collect_from_dict(METRIC_REBAR_BY_SPEC)
     if not metric_only:
-        _collect_from_dict(IMPERIAL_REBAR_BY_SPEC)
+        collect_from_dict(IMPERIAL_REBAR_BY_SPEC)
 
     # sort by area ascending
     candidates.sort(key=lambda x: x[0])
@@ -214,7 +214,7 @@ def ultimate_loading(permanent_load_kN_m2: float,
 
     # 1) Try simple 'combos' format (legacy)
     if load_combos_yaml and Path(load_combos_yaml).exists():
-        cfg = _load_yaml(load_combos_yaml)
+        cfg = load_yaml(load_combos_yaml)
         if isinstance(cfg, dict) and 'combos' in cfg:
             for name, expr in (cfg.get('combos') or {}).items():
                 gcoef = expr.get('G', expr.get('g', None))
@@ -227,7 +227,7 @@ def ultimate_loading(permanent_load_kN_m2: float,
         elif isinstance(cfg, dict) and 'EN1990' in cfg:
             vals = None
             if load_values_yaml and Path(load_values_yaml).exists():
-                vals = _load_yaml(load_values_yaml)
+                vals = load_yaml(load_values_yaml)
 
             psi_root = (vals.get('psi', {}) if isinstance(vals, dict) else {})
             # iterate ULS entries if present
@@ -380,7 +380,7 @@ def flexural_design(ultimate_load_kN_m2: float,
 
     required_ext_As_mm2_per_m = M_ed_Nmm / (z_mm * f_yd_MPa * 1e3)  # f_yd MPa -> N/mm2 ; multiply by 1e3 to get N/mm2 * mm -> N
 
-    selected_spec_ext = _choose_rebar_for_As_required(required_ext_As_mm2_per_m, metric_only=True)
+    selected_spec_ext = choose_rebar_for_As_required(required_ext_As_mm2_per_m, metric_only=True)
     allowable_ext_As_mm2_per_m = None
     if selected_spec_ext is not None:
         area_single_mm2 = selected_spec_ext.area_mm2
@@ -399,7 +399,7 @@ def flexural_design(ultimate_load_kN_m2: float,
 
     M_int_Nmm = internal_moment_kNm_per_m * 1e6
     required_int_As_mm2_per_m = M_int_Nmm / (z_mm * f_yd_MPa * 1e3)
-    selected_spec_int = _choose_rebar_for_As_required(required_int_As_mm2_per_m, metric_only=True)
+    selected_spec_int = choose_rebar_for_As_required(required_int_As_mm2_per_m, metric_only=True)
     allowable_int_As_mm2_per_m = None
     if selected_spec_int is not None:
         area_single_mm2 = selected_spec_int.area_mm2
