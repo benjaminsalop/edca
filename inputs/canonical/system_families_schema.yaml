@@ -1,42 +1,39 @@
 name: system_families
+description: Auto-generated schema for system_families on 2026-02-02T18:31:57.038748+00:00Z
 columns:
-  system_family:
-    type: string
-    units: ''
-  component:
-    type: string
-    units: ''
-  category:
-    type: string
-    units: ''
-  type:
-    type: string
-    units: ''
-  span_behavior:
-    type: number
-    units: ''
-  manufacturer:
-    type: string
-    units: ''
-  unit:
-    type: string
-    units: ''
-  width:
-    type: number
-    units: ''
-  material_concrete_id:
-    type: number
-    units: ''
-  material_steel_id:
-    type: number
-    units: ''
-  material_timber_id:
-    type: string
-    units: ''
-  source:
-    type: number
-    units: ''
-  notes:
-    type: number
-    units: ''
-notes: Auto-generated basic schema. Please add units & refine types.
+- name: system_family
+  type: string
+  units: null
+- name: component
+  type: string
+  units: null
+- name: category
+  type: string
+  units: null
+- name: type
+  type: string
+  units: null
+- name: span_behavior
+  type: string
+  units: null
+- name: manufacturer
+  type: string
+  units: null
+- name: unit
+  type: string
+  units: null
+- name: width
+  type: number
+  units: null
+- name: material_concrete_id
+  type: string
+  units: null
+- name: material_steel_id
+  type: string
+  units: null
+- name: material_timber_id
+  type: string
+  units: null
+- name: source
+  type: string
+  units: null
