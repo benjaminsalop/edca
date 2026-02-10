@@ -18,8 +18,8 @@ CANONICAL_DIR.mkdir(parents=True, exist_ok=True)
 
 csv_files = {
     "materials": SOURCE_DIR / "presets" / "materials" / "materials.csv",
-    "system_families": SOURCE_DIR / "presets" / "systems" / "system_families.csv",
-    "system_variants": SOURCE_DIR / "presets" / "systems" / "system_variants.csv",
+    "system_families": CANONICAL_DIR / "system_families.csv",
+    "system_variants": CANONICAL_DIR / "system_variants.csv",
     "systems": SOURCE_DIR / "presets" / "systems" / "systems.csv",
 }
 

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any
 import pandas as pd
 import math
+import logging
 # your existing conversions
 from edca_code.constants.units import pcf_to_kgm3, kgm3_to_kN_m3, pcf_to_kN_m3, psi_to_mpa, ksi_to_mpa
 
@@ -95,12 +96,19 @@ def load_material_from_csv(path: str,
         # Interpret concrete_f_ck as kN/m^2 (so divide by 1000 to get MPa)
         if raw_fck is None:
             raise ValueError(f"Missing '{fck_col}' for metric material '{material_id}'.")
-        f_ck_MPa = float(raw_fck) / 1000.0   # kN/m^2 -> MPa (N/mm^2)
+        # Heuristic: if value looks very large (>1000) we assume it's given in kN/m2 and convert to MPa.
+        # If value looks small (<=1000) assume user supplied MPa already (common).
+        if float(raw_fck) > 1000.0:
+            # value in kN/m2 -> MPa
+            f_ck_MPa = float(raw_fck) / 1000.0
+        else:
+            # value likely already in MPa
+            f_ck_MPa = float(raw_fck)
         # steel fy if present: treat as MPa (if missing, set 0.0)
         f_yk_MPa = float(raw_fyk) if raw_fyk is not None and raw_fyk != "" else 0.0
         # density: kg/m3 -> kN/m3
         if raw_density is None or raw_density == "":
-            # default concrete density ~2500 kg/m3
+            logging.warning("No density found for '%s' — assuming 2500 kg/m3 (concrete default).", material_id)
             density_kN_m3 = kgm3_to_kN_m3(2500.0)
         else:
             # we expect metric density in kg/m3

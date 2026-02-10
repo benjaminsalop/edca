@@ -1,0 +1,102 @@
+graph TB
+
+ROOT["EDCA Repository (.)"]
+
+ROOT --> G_CODE["Code"]
+ROOT --> G_DATA["Data"]
+ROOT --> G_META["Docs / Tests / Config"]
+
+subgraph SG_CODE["Code"]
+  direction TB
+  G_CODE --> EDCA["edca_code/"]
+  EDCA --> RUN1["run_edca.py"]
+  RUN1 --> RUN2["run_edca_new.py"]
+  RUN2 --> RUN3["run_edca_backup.py"]
+  EDCA --> A_EDCA(( ))
+end
+
+subgraph SG_DATA["Data"]
+  direction TB
+  G_DATA --> INPUTS["inputs/"]
+  INPUTS --> OUTPUTS["outputs/"]
+  OUTPUTS --> SETUP["setup/"]
+  INPUTS --> A_INPUTS(( ))
+  OUTPUTS --> A_OUTPUTS(( ))
+  SETUP --> A_SETUP(( ))
+end
+
+subgraph SG_META["Docs / Tests / Config"]
+  direction TB
+  G_META --> DOCS["docs/"]
+  DOCS --> TESTS["tests/"]
+  TESTS --> NOTEBOOKS["notebooks/"]
+  NOTEBOOKS --> PYPROJ["pyproject.toml"]
+  PYPROJ --> SETUPCFG["setup.cfg"]
+  SETUPCFG --> MANIFEST["manifest.in"]
+  MANIFEST --> README["README.md"]
+  TESTS --> A_TESTS(( ))
+end
+
+subgraph SG_EDCA["edca_code/"]
+  direction TB
+
+  A_EDCA --> CONST["constants/"]
+  A_EDCA --> SCRIPTS["scripts/"]
+
+  subgraph SG_CONST["constants/"]
+    direction TB
+    CONST_INIT["__init__.py"] --> UNITS["units.py"] --> REBAR["rebar_properties.py"]
+  end
+
+  subgraph SG_SCRIPTS["scripts/"]
+    direction TB
+    SCRIPTS --> CODECHECKS["code_checks/"]
+    SCRIPTS --> CORE["core/"]
+
+    subgraph SG_CODECHECKS["scripts/code_checks/"]
+      direction TB
+      CL["code_loader.py"] --> CR["code_runner.py"] --> CSLAB["continuousslab.py"] --> FSLAB["flatslab.py"] --> RSLAB["ribbedslab.py"] --> SSSLAB["simplysupportedslab.py"]
+    end
+
+    subgraph SG_CORE["scripts/core/"]
+      direction TB
+      PARSE["parse.py"] --> LOADS["loads.py"] --> SYSTEMS["systems.py"] --> SPANS["spans.py"] --> TAKEOFF["takeoff.py"] --> CARBON["carbon.py"] --> RANK["rank.py"] --> REPORT["reporting.py"] --> UTILS["utils.py"]
+    end
+  end
+end
+
+subgraph SG_INPUTS["inputs/"]
+  direction TB
+
+  A_INPUTS --> CANON["canonical/"]
+  A_INPUTS --> SOURCE["source/"]
+
+  subgraph SG_CANON["inputs/canonical/"]
+    direction TB
+    MAT["materials.parquet"] --> SYS["systems.parquet"] --> FAM["system_families.csv/parquet"] --> VAR["system_variants.csv/parquet"] --> SCHEMA["*_schema.yaml"]
+  end
+
+  subgraph SG_SOURCE["inputs/source/"]
+    direction TB
+    PRESETS["presets/"] --> OCC["occupancies.csv"] --> LV["load_values.yaml"] --> LC["load_combinations.yaml"] --> PREF["system_preferences.yaml"] --> TYPES["system_types.yaml"] --> TYPO["typologies.yaml"] --> SOURCES["sources.yaml"] --> VERSION["version.yaml"]
+  end
+end
+
+subgraph SG_OUTPUTS["outputs/"]
+  direction TB
+  A_OUTPUTS --> OUTRUN["edca_run/"]
+end
+
+subgraph SG_SETUP["setup/"]
+  direction TB
+  A_SETUP --> CTRL["control_files/"]
+  A_SETUP --> LOADERS["loaders.py"]
+  A_SETUP --> PARQUETS["parquets.py"]
+  A_SETUP --> SCHEMAS["schemas.py"]
+  A_SETUP --> VALID["validate_data.py"]
+end
+
+subgraph SG_TESTS["tests/"]
+  direction TB
+  A_TESTS --> BT["building_tests.py"] --> CT["carbon_tests.py"] --> LT["load_tests.py"] --> ST["systems_tests.py"]
+end

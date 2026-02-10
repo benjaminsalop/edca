@@ -27,6 +27,9 @@ def pcf_to_kgm3(pcf: float) -> float:
 def psf_to_nm2(psf: float) -> float:
     return psf * 47.8803
 
+def psf_to_knm2(psf: float) -> float:
+    return psf * 0.0478803
+
 def in2_to_mm2(inches2: float) -> float:
     return inches2 * 645.16
 

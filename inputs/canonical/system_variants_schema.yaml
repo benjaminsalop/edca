@@ -1,5 +1,5 @@
 name: system_variants
-description: Auto-generated schema for system_variants on 2026-02-02T18:31:57.047140+00:00Z
+description: Auto-generated schema for system_variants on 2026-02-10T08:22:47.883210+00:00Z
 columns:
 - name: system_variant
   type: string
@@ -41,12 +41,9 @@ columns:
   type: number
   units: null
 - name: timber_volume
-  type: string
+  type: number
   units: null
 - name: material_concrete_id
-  type: string
-  units: null
-- name: material_pt_id
   type: string
   units: null
 - name: material_steel_id

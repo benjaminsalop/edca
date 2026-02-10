@@ -62,13 +62,22 @@ def choose_rebar_for_As_required(as_req_mm2_per_m: float,
             d_mm = spec.diameter_mm
             area_single = math.pi * (d_mm / 2.0) ** 2
         # spacing unit handling: many specs use spacing in mm or in
-        if getattr(spec, "spacing_unit", None) == "mm":
-            spacing_m = spec.spacing / 1000.0
-        elif getattr(spec, "spacing_unit", None) == "in":
-            spacing_m = spec.spacing * 0.0254
+
+        spacing_val = getattr(spec, "spacing", None)
+        spacing_unit = getattr(spec, "spacing_unit", None)
+        if spacing_val is None:
+            # fallback huge spacing (effectively zero bars per m)
+            spacing_m = 1e6
         else:
-            # if spacing unit not provided, try to interpret numeric as mm
-            spacing_m = getattr(spec, "spacing", 1000.0) / 1000.0
+            try:
+                if spacing_unit == "mm":
+                    spacing_m = float(spacing_val) / 1000.0
+                elif spacing_unit == "in":
+                    spacing_m = float(spacing_val) * 0.0254
+                else:
+                    spacing_m = float(spacing_val) / 1000.0
+            except Exception:
+                spacing_m = 1e6
         bars_per_m = 1.0 / spacing_m if spacing_m > 0 else 0.0
         return area_single * bars_per_m
 
