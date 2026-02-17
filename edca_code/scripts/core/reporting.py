@@ -17,7 +17,6 @@ from edca_code.scripts.code_checks.code_runner import run_code_checks_if_request
 
 logger = logging.getLogger("reporting")
 
-
 # ------------------------
 # Utilities
 # ------------------------
@@ -1133,16 +1132,13 @@ def plot_lowest_family_variants(df_all: pd.DataFrame, out_dir: Union[str, Path])
 
 def plot_lowest_family_per_typology(
     df_all: pd.DataFrame,
-    out_dir: Union[str, Path],
-    *,
-    figures_subdir: str = "reporting/figures",
-) -> Optional[str]:
+    out_dir: Union[str, Path]) -> Optional[str]:
     """
     For each typology: find the lowest-carbon system_family and plot all *successful*
     variants for those families (span vs carbon_per_m2). Return saved filepath or None.
     """
     out_dir = Path(out_dir)
-    figures_dir = out_dir / figures_subdir
+    figures_dir = out_dir
     D = _normalize_columns(df_all)
     if "system_family" not in D.columns or "typology" not in D.columns:
         return None
@@ -1203,7 +1199,6 @@ def plot_lowest_family_per_typology(
     ax.set_title("Lowest family per typology — span vs carbon for chosen families")
     ax.grid(True, linestyle=":", alpha=0.4)
     ax.legend(fontsize=7, ncol=2)
-    figures_dir.mkdir(parents=True, exist_ok=True)
     out_fp = figures_dir / "lowest_family_per_typology"
     fig.savefig(out_fp, bbox_inches="tight", dpi=150)
     plt.close(fig)
@@ -1263,15 +1258,14 @@ def plot_span_vs_load_curves_by_family(
     df: pd.DataFrame,
     out_dir: Union[str, Path],
     *,
-    figures_subdir: str = "reporting/figures",
-) -> Optional[str]:
+    figures_subdir: Optional[str] = None) -> Optional[str]:
     """
     Plot span vs total-load (or capacity) curves grouped by family (fallback to system_family).
     Detects suitable total-load column via _infer_total_load_col (and falls back to common column names).
     Returns saved filepath or None.
     """
     out_dir = Path(out_dir)
-    figures_dir = out_dir / figures_subdir
+    figures_dir = out_dir
 
     # use helper to pick a sensible total load column
     total_col = _infer_total_load_col(df)
@@ -1313,8 +1307,7 @@ def plot_span_vs_load_curves_by_family(
     ax.set_title("Span vs Load curves by family")
     ax.grid(True, linestyle=":", alpha=0.4)
     ax.legend(fontsize=7, ncol=2)
-    figures_dir.mkdir(parents=True, exist_ok=True)
-    out_fp = figures_dir / "span_vs_load_curves_by_family.png"
+    out_fp = figures_dir
     fig.savefig(out_fp, bbox_inches="tight", dpi=150)
     plt.close(fig)
     return str(out_fp)

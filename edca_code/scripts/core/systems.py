@@ -131,8 +131,7 @@ def filter_systems(
     unit: Optional[str] = None,
     depth_limit_enabled: bool = False,
     depth_limit_mm: Optional[float] = None,
-    require_separate_checks: bool = False,
-) -> pd.DataFrame:
+    require_separate_checks: bool = False) -> pd.DataFrame:
     """
     Robust system filter:
       - normalizes & enforces `unit` strictly (if provided)
@@ -208,7 +207,6 @@ def filter_systems(
     filtered = df[mask].reset_index(drop=True)
     logger.debug("[systems] filter_systems: started with %d rows, returning %d rows", len(df), len(filtered))
     return filtered
-
 
 def select_candidate_systems_per_floor(
     systems_catalog_path: str,

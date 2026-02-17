@@ -40,9 +40,9 @@ NOTES:                                                    # (optional); Structur
 #╙─────────╜
 
 SPANS:                                                    # Defining the range of spans to consider
-  mode: range                                             # list | range
-  range: [6.5, 9]                                         # (if mode=range) min and max span values
-  sweep: true                                             # (if mode=range) true|false; if true, we sweep through span values in 1m or 1ft increments
+  mode: list                                              # list | range
+  range: [9]                                              # (if mode=range) min and max span values
+  sweep: false                                            # (if mode=range) true|false; if true, we sweep through span values in 1m or 1ft increments
   step: 0.5                                               # (optional); interpreted in UNIT (ft if imperial, m if metric)
   edge_cantilever_max: 2                                  # (optional); max edge cantilever (m or ft)       
 
