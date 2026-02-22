@@ -67,7 +67,7 @@ def m2_to_ft2(m2: float) -> float:
 
 # Metric Conversions
 def kgm3_to_kN_m3(kgm3: float) -> float:
-    return float(kgm3) * G / 1000.0
+    return float(kgm3) * 9.80665 / 1000.0
 
 def psi_to_MPa(psi: float) -> float:
     return float(psi) * 0.00689476

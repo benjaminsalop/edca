@@ -101,21 +101,61 @@ def parse_spans(spans_block: Any) -> List[float]:
     """
     Produce the list of spans to consider based on SPANS block.
     Supports:
-      mode: range with optional sweep+step
-      mode: list with explicit list
+       mode: range with optional sweep+step
+       mode: list with explicit list
     """
-    if not isinstance(spans_block, dict):
+    def _as_float_list(x: Any) -> List[float]:
+        if x is None:
+            return []
+        if isinstance(x, (int, float)):
+            return [float(x)]
+        if isinstance(x, str):
+            try:
+                return [float(x)]
+            except Exception:
+                return []
+        if isinstance(x, (list, tuple)):
+            out: List[float] = []
+            for v in x:
+                try:
+                    out.append(float(v))
+                except Exception:
+                    pass
+            return out
         return []
+
+    # Allow SPANS: 9 (scalar) as a shorthand
+    if not isinstance(spans_block, dict):
+        return _as_float_list(spans_block)
 
     mode = str(spans_block.get("mode", "range")).strip().lower()
 
     if mode == "list":
-        vals = spans_block.get("list", [])
-        return [float(v) for v in vals] if isinstance(vals, list) else []
+        # Accept list:, values:, or (legacy/mistyped) range: in list-mode.
+        vals = spans_block.get("list", None)
+        if vals is None:
+            vals = spans_block.get("values", None)
+        if vals is None:
+            vals = spans_block.get("range", None)
+        return _as_float_list(vals)
 
-    # default: range
-    r = spans_block.get("range", [])
-    if not (isinstance(r, (list, tuple)) and len(r) == 2):
+     # default: range
+    r = spans_block.get("range", None)
+    if r is None:
+        r = spans_block.get("values", None)
+    if r is None:
+        r = spans_block.get("list", None)
+
+    # Allow range: 9 or range: [9] meaning “single span”
+    if isinstance(r, (int, float, str)):
+        return _as_float_list(r)
+    if isinstance(r, (list, tuple)):
+        if len(r) == 1:
+            return _as_float_list(r[0])
+        if len(r) != 2:
+            # If someone puts more than 2 entries, treat it as an explicit list.
+            return _as_float_list(r)
+    else:
         return []
 
     mn, mx = float(r[0]), float(r[1])
@@ -123,8 +163,11 @@ def parse_spans(spans_block: Any) -> List[float]:
     step = spans_block.get("step", 1.0)
     step = float(step) if step else 1.0
 
+    # If bounds are equal (or sweep is off), treat as single span
+    if abs(mx - mn) < 1e-9:
+        return [round(mn, 6)]
     if not sweep:
-        return [mn, mx]
+        return [round(mn, 6), round(mx, 6)]
 
     # inclusive sweep with floating tolerance
     out: List[float] = []

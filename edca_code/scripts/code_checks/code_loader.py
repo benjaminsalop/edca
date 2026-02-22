@@ -5,6 +5,7 @@ import math
 import logging
 # your existing conversions
 from edca_code.constants.units import pcf_to_kgm3, kgm3_to_kN_m3, pcf_to_kN_m3, psi_to_mpa, ksi_to_mpa
+from pathlib import Path
 
 # Constants
 G = 9.80665  # m/s^2
@@ -38,6 +39,36 @@ def _detect_unit_flag(row: pd.Series) -> Optional[str]:
                 return "imperial"
     return None
 
+def _read_material_table(path: str) -> pd.DataFrame:
+    """Read materials table from CSV or Parquet; return all-string DataFrame (deterministic)."""
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Materials file not found: {path}")
+
+    suf = p.suffix.lower()
+    if suf == ".csv":
+        df = pd.read_csv(path, dtype=str).fillna("")
+    elif suf in (".parquet", ".pq"):
+        df = pd.read_parquet(path)
+        # normalize to strings to match existing behavior
+        df = df.copy()
+        for c in df.columns:
+            df[c] = df[c].astype(str)
+        df = df.fillna("")
+    else:
+        raise ValueError(f"Unsupported materials file type '{suf}'. Use .csv or .parquet")
+
+    return df
+
+def _resolve_col(df: pd.DataFrame, name: str) -> str:
+    """Resolve a column by exact name or case-insensitive match."""
+    if name in df.columns:
+        return name
+    low = {c.lower(): c for c in df.columns}
+    if name.lower() in low:
+        return low[name.lower()]
+    raise KeyError(f"Expected column '{name}' in materials file. Available: {list(df.columns)}")
+
 def load_material_from_csv(path: str,
                            material_id: str,
                            *,
@@ -56,7 +87,16 @@ def load_material_from_csv(path: str,
       - density is kg/m^3 (metric) or pcf (imperial).
     """
 
-    df = pd.read_csv(path, dtype=str).fillna("")  # read as strings to be deterministic
+    df = _read_material_table(path)
+
+    # Resolve columns (supports case variations)
+    id_col = _resolve_col(df, id_col)
+    fck_col = _resolve_col(df, fck_col) if fck_col in df.columns or fck_col.lower() in [c.lower() for c in df.columns] else fck_col
+    fyk_col = _resolve_col(df, fyk_col) if fyk_col in df.columns or fyk_col.lower() in [c.lower() for c in df.columns] else fyk_col
+    fu_col  = _resolve_col(df, fu_col)  if fu_col  in df.columns or fu_col.lower()  in [c.lower() for c in df.columns] else fu_col
+    density_col  = _resolve_col(df, density_col)  if density_col  in df.columns or density_col.lower()  in [c.lower() for c in df.columns] else density_col
+    gamma_c_col  = _resolve_col(df, gamma_c_col)  if gamma_c_col  in df.columns or gamma_c_col.lower()  in [c.lower() for c in df.columns] else gamma_c_col
+    gamma_s_col  = _resolve_col(df, gamma_s_col)  if gamma_s_col  in df.columns or gamma_s_col.lower()  in [c.lower() for c in df.columns] else gamma_s_col
 
     # case-insensitive match for material_id
     material_id_str = str(material_id).strip().lower()

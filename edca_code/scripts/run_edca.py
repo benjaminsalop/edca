@@ -134,8 +134,13 @@ def run_codechecks_on_winners(
     df_winners: pd.DataFrame,
     out_dir: Path,
     run_flag: bool,
+    material_csv_path: Optional[str] = None,
+    load_combos_yaml: Optional[str] = None,
+    load_values_yaml: Optional[str] = None,
+    debug_inputs: bool = False,
+    debug_only_on_fail: bool = True,
+    debug_max_rows: int = 50,
 ) -> pd.DataFrame:
-    """Run code checks on winners only, using the real code_runner signature."""
     if not run_flag:
         return pd.DataFrame()
     if df_winners is None or df_winners.empty:
@@ -153,20 +158,21 @@ def run_codechecks_on_winners(
     if "system_variant" in df_in.columns:
         df_in["system_variant"] = df_in["system_variant"].astype(str)
 
-    # REQUIRED positional args: (candidates_df, out_dir, run_flag)
     try:
-        df_checks = run_code_checks_if_requested(df_in, code_out_dir, True)
+        return run_code_checks_if_requested(
+            df_in,
+            code_out_dir,
+            True,
+            material_csv_path=material_csv_path,
+            load_combos_yaml=load_combos_yaml,
+            load_values_yaml=load_values_yaml,
+            debug_inputs=debug_inputs,
+            debug_only_on_fail=debug_only_on_fail,
+            debug_max_rows=debug_max_rows,
+        )
     except Exception:
         logger.exception("[codechecks] Code checks failed (df_winners only).")
         return pd.DataFrame()
-
-    if isinstance(df_checks, pd.DataFrame) and not df_checks.empty:
-        try:
-            df_checks.to_csv(code_out_dir / "codecheck_results.csv", index=False)
-        except Exception:
-            logger.exception("[codechecks] Failed to write codecheck_results.csv")
-    return df_checks if isinstance(df_checks, pd.DataFrame) else pd.DataFrame()
-
 
 def main(argv: Optional[List[str]] = None) -> None:
     p = argparse.ArgumentParser(prog="run_edca", description="Run EDCA pipeline.")
@@ -184,6 +190,12 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     p.add_argument("--depth-limit-mm", type=float, default=None, help="Optional depth limit (mm)")
     p.add_argument("--run-codechecks", action="store_true", help="Run code checks on winners only")
+    p.add_argument("--codechecks-debug-inputs", action="store_true",
+                   help="Log and attach the exact inputs/material properties used by code checks.")
+    p.add_argument("--codechecks-debug-all", action="store_true",
+                   help="If set, print codecheck inputs for ALL rows (otherwise only failures).")
+    p.add_argument("--codechecks-debug-max-rows", type=int, default=50,
+                   help="Cap how many debug rows are logged/attached (default 50).")
     p.add_argument("--verbose", action="store_true", help="Verbose logging")
 
     args = p.parse_args(argv)
@@ -333,6 +345,10 @@ def main(argv: Optional[List[str]] = None) -> None:
             df_winners=df_winners,
             out_dir=out_dir,
             run_flag=bool(args.run_codechecks),
+            material_csv_path=str(args.materials),
+            debug_inputs=bool(getattr(args, "codechecks_debug_inputs", False)),
+            debug_only_on_fail=not bool(getattr(args, "codechecks_debug_all", False)),
+            debug_max_rows=int(getattr(args, "codechecks_debug_max_rows", 50) or 50),
         )
         if isinstance(df_checks, pd.DataFrame) and not df_checks.empty and df_winners is not None and not df_winners.empty:
             merged = df_winners.merge(df_checks, on="system_variant", how="left", suffixes=("", "_codecheck"))

@@ -8,12 +8,30 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import matplotlib
+import matplotlib.pyplot as plt
 matplotlib.use("Agg")
 
-from edca_code.scripts.core.utils import to_numeric_safe, reorder_output_columns, standardize_schema
-from edca_code.scripts.code_checks.code_runner import run_code_checks_if_requested
+
+# Prefer canonical helpers when available, but keep fallbacks so reporting.py
+# doesn’t crash if your utils module changes.
+try:
+    from edca_code.scripts.core.utils import standardize_schema as _standardize_schema  # type: ignore
+except Exception:  # pragma: no cover
+    def _standardize_schema(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None:
+            return pd.DataFrame()
+        D = df.copy()
+        D.columns = [str(c).strip() for c in D.columns]
+        return D
+
+standardize_schema = _standardize_schema
+
+try:
+    from edca_code.scripts.code_checks.code_runner import run_code_checks_if_requested  # type: ignore
+except Exception:  # pragma: no cover
+    def run_code_checks_if_requested(*args, **kwargs):
+        return pd.DataFrame()
 
 logger = logging.getLogger("reporting")
 
@@ -38,22 +56,32 @@ def _ensure_carbon(df):
         return df
     raise KeyError("No carbon column found (expected carbon_per_m2 or carbon_total_kgCO2)")
 
-def _infer_total_load_col(df):
-    # common candidates
-    candidates = ["total_load", "total_capacity", "total_capacity", "total", "sdl_total", "sdl_total", "sdl", "ll"]
-    for c in candidates:
+def _infer_total_load_col(df: pd.DataFrame) -> Optional[str]:
+    """Best-effort choice of a 'total load' column.
+
+    Priority:
+      1) existing 'total_load'
+      2) synthesize total_load = sdl_total + ll, else sdl + ll
+      3) fall back to other common single columns (capacity, etc.)
+
+    Note: if synthesis is possible, this function adds a 'total_load' column
+    to the passed dataframe so downstream code can safely index it.
+    """
+    if df is None or df.empty:
+        return None
+    if "total_load" in df.columns:
+        return "total_load"
+    if "sdl_total" in df.columns and "ll" in df.columns:
+        df["total_load"] = pd.to_numeric(df["sdl_total"], errors="coerce") + pd.to_numeric(df["ll"], errors="coerce")
+        return "total_load"
+    if "sdl" in df.columns and "ll" in df.columns:
+        df["total_load"] = pd.to_numeric(df["sdl"], errors="coerce") + pd.to_numeric(df["ll"], errors="coerce")
+        return "total_load"
+    for c in ("total_capacity", "capacity", "sdl_total", "sdl", "ll"):
         if c in df.columns:
             return c
-    # try to synthesize from sdl_total + ll or sdl + ll
-    if "sdl_total" in df.columns and "ll" in df.columns:
-        df = df.copy()
-        df["total_load_synth"] = pd.to_numeric(df["sdl_total"], errors="coerce") + pd.to_numeric(df["ll"], errors="coerce")
-        return "total_load_synth"
-    if "sdl" in df.columns and "ll" in df.columns:
-        df = df.copy()
-        df["total_load_synth"] = pd.to_numeric(df["sdl"], errors="coerce") + pd.to_numeric(df["ll"], errors="coerce")
-        return "total_load_synth"
     return None
+
 
 def _ensure_success_mask(df):
     # reuse your existing _success_mask if present; otherwise infer pass_overall
@@ -131,7 +159,7 @@ def write_edca_reports_from_summary(
     floor_assignments: dict[int, str] | None = None,
     floor_area_lookup: dict[int, float] | None = None,
     verbose: bool = False,
-    metric: str = "carbon_per_m2") -> ReportPaths:
+    metric: str = "carbon_per_m2") -> ReportArtifacts:
     """
     Same as write_edca_reports, but uses summary_ranked_all.csv files found under `out_dir`
     as the canonical input. This function will:
@@ -143,7 +171,7 @@ def write_edca_reports_from_summary(
       4. Write both tables under: <out_dir>/reporting/tables/
       5. Use the union table as the canonical `candidates_input` to call write_edca_reports(...)
 
-    Returns the same ReportPaths/datatype as write_edca_reports.
+    Returns the same ReportArtifacts/datatype as write_edca_reports.
     """
     log = logging.getLogger(__name__)
     out_dir = Path(out_dir)
@@ -477,6 +505,31 @@ def concat_candidates_input(candidates: Any) -> pd.DataFrame:
 
     raise TypeError(f"Unsupported candidates type: {type(candidates)}")
 
+# ------------------------
+# Pareto utilities
+# ------------------------
+
+def compute_pareto_frontier(df: pd.DataFrame,
+                            x_col: str,
+                            y_col: str,
+                            minimize_y: bool = True) -> pd.DataFrame:
+    """
+    Compute 2D Pareto frontier.
+    Assumes larger x is 'more' (e.g. span),
+    and lower y is better (e.g. carbon).
+    """
+    df = df[[x_col, y_col]].dropna().sort_values(x_col)
+
+    frontier = []
+    best_y = float("inf")
+
+    for _, row in df.iterrows():
+        y = row[y_col]
+        if y < best_y:
+            frontier.append(row)
+            best_y = y
+
+    return pd.DataFrame(frontier)
 
 # ------------------------
 # IO containers
@@ -984,6 +1037,7 @@ def plot_span_vs_carbon_by_type(df: pd.DataFrame, out_fp: Path, *, label_prefix=
     return str(out_fp)
 
 
+
 def plot_bar_best_by_group(
     best_df: pd.DataFrame,
     group_col: str,
@@ -991,8 +1045,23 @@ def plot_bar_best_by_group(
     out_path: Union[str, Path],
     *,
     title: str = "",
+    orientation: str = "v",
+    add_value_labels: bool = True,
+    color_by: Optional[str] = None,
+    show_legend: bool = True,
 ) -> Optional[str]:
-    """Bar chart: one bar per group, height=metric."""
+    """Bar chart: one bar per group, value=metric.
+
+    Parameters
+    ----------
+    orientation:
+        "v" for vertical bars (default) or "h" for horizontal bars.
+    add_value_labels:
+        If True, prints bar-end value labels.
+    color_by:
+        Optional column used to color-code bars (e.g., typology). If not provided or missing,
+        bars use matplotlib defaults.
+    """
     if best_df is None or best_df.empty:
         return None
     D = best_df.copy()
@@ -1004,17 +1073,66 @@ def plot_bar_best_by_group(
     if D.empty:
         return None
 
-    fig, ax = plt.subplots(figsize=(max(7, 0.6 * len(D)), 4.8))
-    ax.bar(D[group_col].astype(str), D[metric_col].astype(float).values)
-    ax.set_ylabel(metric_col)
-    ax.set_title(title or f"Best by {group_col} ({metric_col})")
-    ax.tick_params(axis="x", rotation=45, labelsize=9)
-    ax.grid(True, linestyle=":", alpha=0.4)
-    plt.tight_layout()
     out_path = Path(out_path)
-    fig.savefig(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    labels = D[group_col].astype(str).tolist()
+    values = D[metric_col].astype(float).values
+
+    # Build color mapping if requested
+    colors = None
+    legend_handles = None
+    if color_by and color_by in D.columns:
+        cats = D[color_by].astype(str).fillna("Unknown")
+        uniq = sorted(cats.unique())
+        cmap = plt.get_cmap("tab20")
+        colmap = {u: cmap(i % cmap.N) for i, u in enumerate(uniq)}
+        colors = [colmap[v] for v in cats]
+        # proxy handles for legend
+        legend_handles = [plt.Line2D([0], [0], marker="s", linestyle="", markersize=8, color=colmap[u], label=u)
+                          for u in uniq]
+
+    if orientation not in {"v", "h"}:
+        orientation = "v"
+
+    if orientation == "h":
+        fig_h = max(4.2, 0.42 * len(D) + 1.6)
+        fig, ax = plt.subplots(figsize=(8.5, fig_h))
+        y = np.arange(len(values))
+        bars = ax.barh(y, values, color=colors)
+        ax.set_yticks(y, labels)
+        ax.set_xlabel(metric_col)
+        ax.set_title(title or f"Best by {group_col} ({metric_col})")
+        ax.grid(True, axis="x", linestyle=":", alpha=0.35)
+        if add_value_labels:
+            for rect, v in zip(bars, values):
+                if np.isnan(v):
+                    continue
+                ax.text(v, rect.get_y() + rect.get_height() / 2, f" {v:.0f}", va="center", fontsize=9)
+        if legend_handles and show_legend:
+            ax.legend(handles=legend_handles, title=color_by, loc="lower right", frameon=False)
+    else:
+        fig_w = max(7.2, 0.32 * len(D) + 3.2)
+        fig, ax = plt.subplots(figsize=(fig_w, 4.8))
+        x = np.arange(len(values))
+        bars = ax.bar(x, values, color=colors)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_ylabel(metric_col)
+        ax.set_title(title or f"Best by {group_col} ({metric_col})")
+        ax.grid(True, axis="y", linestyle=":", alpha=0.35)
+        if add_value_labels:
+            for rect, v in zip(bars, values):
+                if np.isnan(v):
+                    continue
+                ax.text(rect.get_x() + rect.get_width() / 2, v, f"{v:.0f}", ha="center", va="bottom", fontsize=9)
+        if legend_handles and show_legend:
+            ax.legend(handles=legend_handles, title=color_by, loc="upper right", frameon=False)
+
+    fig.savefig(out_path, bbox_inches="tight", dpi=200)
     plt.close(fig)
     return str(out_path)
+
 
 
 def plot_span_vs_carbon_colored(
@@ -1026,291 +1144,154 @@ def plot_span_vs_carbon_colored(
     span_col: str = "max_span",
     carbon_col: str = "carbon_per_m2",
     title: str = "",
+    positive_only: bool = False,
+    highlight_variants: Optional[List[str]] = None,
 ) -> Optional[str]:
-    """Scatter: x=span, y=carbon, colored by group."""
+    """
+    Scatter: x=span, y=carbon, colored by `color_by`.
+
+    Enhancements for reporting:
+      - positive_only: filter carbon > 0
+      - highlight_variants: grey all points, then overlay the highlighted variants
+        (expects a column like 'system_variant' or 'variant_id').
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
     if df_in is None or df_in.empty:
-        return None
+        _write_placeholder_figure(out_path, "No data to plot.")
+        return str(out_path)
 
     D = _normalize_columns(df_in)
     D["_span"] = to_numeric_safe(D.get(span_col))
     D["_carbon"] = to_numeric_safe(D.get(carbon_col))
     D = D.dropna(subset=["_span", "_carbon"])
 
+    if positive_only:
+        D = D[D["_carbon"] > 0].copy()
+
     if success_only:
         D["_success"] = _success_mask(D)
         D = D[D["_success"] == True].copy()
 
     if D.empty:
-        return None
+        _write_placeholder_figure(out_path, "No points after filtering.")
+        return str(out_path)
+
+    # Determine id column for highlighting
+    id_col = None
+    for c in ["system_variant", "variant_id", "variant", "id", "name"]:
+        if c in D.columns:
+            id_col = c
+            break
+
+    highlight_set = set([str(x) for x in highlight_variants]) if highlight_variants else set()
+    has_highlight = bool(highlight_set) and (id_col is not None)
 
     if color_by not in D.columns:
-        color_by = "typology" if "typology" in D.columns else None
+        color_by = "typology" if "typology" in D.columns else ""
+
+    # Build stable category order
+    cats = []
+    if color_by:
+        cats = sorted(D[color_by].dropna().astype(str).unique())
 
     fig, ax = plt.subplots(figsize=(9, 6))
-    if color_by:
-        for gv in sorted(D[color_by].dropna().astype(str).unique()):
-            sub = D[D[color_by].astype(str) == gv]
-            ax.scatter(sub["_span"], sub["_carbon"], s=22, alpha=0.85, label=str(gv), edgecolors="none")
-        ax.legend(title=color_by, loc="best")
-    else:
-        ax.scatter(D["_span"], D["_carbon"], s=22, alpha=0.85, edgecolors="none")
 
-    ax.set_xlabel("Max span (m)")
-    ax.set_ylabel("Embodied carbon (kgCO₂e / m²)")
-    ax.set_title(title or ("Successful variants: span vs carbon" if success_only else "All variants: span vs carbon"))
-    ax.grid(True, linestyle=":", alpha=0.4)
-    plt.tight_layout()
-    out_path = Path(out_path)
-    fig.savefig(out_path)
+    if has_highlight:
+        # Context (all points, grey)
+        ax.scatter(D["_span"], D["_carbon"], s=18, alpha=0.15, edgecolors="none")
+        H = D[D[id_col].astype(str).isin(highlight_set)].copy()
+        if H.empty:
+            # Still save a useful figure
+            ax.set_title(title or "Span vs embodied carbon")
+            ax.set_xlabel("Span")
+            ax.set_ylabel("Embodied carbon")
+            fig.savefig(out_path, bbox_inches="tight", dpi=300)
+            plt.close(fig)
+            return str(out_path)
+
+        if color_by:
+            for gv in cats:
+                sub = H[H[color_by].astype(str) == gv]
+                if sub.empty:
+                    continue
+                ax.scatter(sub["_span"], sub["_carbon"], s=55, alpha=1.0, label=str(gv), edgecolors="none")
+            ax.legend(title=color_by, loc="best", frameon=True)
+        else:
+            ax.scatter(H["_span"], H["_carbon"], s=55, alpha=1.0, edgecolors="none", label="highlighted")
+            ax.legend(loc="best", frameon=True)
+    else:
+        # Regular colored scatter
+        if color_by:
+            for gv in cats:
+                sub = D[D[color_by].astype(str) == gv]
+                ax.scatter(sub["_span"], sub["_carbon"], s=22, alpha=0.85, label=str(gv), edgecolors="none")
+            ax.legend(title=color_by, loc="best", frameon=True)
+        else:
+            ax.scatter(D["_span"], D["_carbon"], s=22, alpha=0.85, edgecolors="none", label="variants")
+            ax.legend(loc="best", frameon=True)
+
+    ax.set_title(title or "Span vs embodied carbon")
+    ax.set_xlabel("Span")
+    ax.set_ylabel("Embodied carbon")
+    ax.grid(True, alpha=0.25)
+    fig.savefig(out_path, bbox_inches="tight", dpi=300)
     plt.close(fig)
     return str(out_path)
 
+def plot_span_vs_carbon_pareto(df_all: pd.DataFrame,
+                               fig_dir: Path,
+                               carbon_col: str = "carbon_per_m2") -> Dict[str, Path]:
 
-def plot_lowest_family_variants(df_all: pd.DataFrame, out_dir: Union[str, Path]) -> Dict[str, str]:
-    """
-    Verbose:
-      - lowest-carbon family: span vs total load
-      - lowest-carbon family: span vs carbon
-    """
-    figures: Dict[str, str] = {}
-    D = _normalize_columns(df_all)
-    if "system_family" not in D.columns:
-        return figures
+    span_col = "span" if "span" in df_all.columns else (
+        "max_span" if "max_span" in df_all.columns else None
+    )
 
-    D["_success"] = _success_mask(D)
-    D = D[D["_success"] == True].copy()
-    if D.empty:
-        return figures
-
-    fam = _lowest_carbon_family(D)
-    if fam is None:
-        return figures
-
-    sub = D[D["system_family"] == fam].copy()
-    if sub.empty:
-        return figures
-
-    figs_dir = Path(out_dir)
-
-    # span vs total load
-    total_col = _infer_total_load_col(sub)
-    if total_col:
-        sub["_total"] = to_numeric_safe(sub.get(total_col))
-        sub["_span"] = to_numeric_safe(sub.get("max_span"))
-        sub_t = sub.dropna(subset=["_total", "_span"])
-        if not sub_t.empty:
-            fig, ax = plt.subplots(figsize=(8.5, 5.5))
-            ax.scatter(sub_t["_span"], sub_t["_total"], s=30, alpha=0.85, edgecolors="none")
-            ax.set_xlabel("Max span (m)")
-            ax.set_ylabel(total_col)
-            ax.set_title(f"Lowest-carbon family '{fam}': span vs total load ({total_col})")
-            ax.grid(True, linestyle=":", alpha=0.4)
-            plt.tight_layout()
-            fp = figs_dir / f"lowest_family_{fam}_span_vs_total_load.png"
-            fig.savefig(fp)
-            plt.close(fig)
-            figures["lowest_family_span_vs_total_load"] = str(fp)
-
-    # span vs carbon
-    sub["_carbon"] = to_numeric_safe(sub.get("carbon_per_m2"))
-    sub["_span"] = to_numeric_safe(sub.get("max_span"))
-    sub_c = sub.dropna(subset=["_carbon", "_span"])
-    if not sub_c.empty:
-        fig, ax = plt.subplots(figsize=(8.5, 5.5))
-        ax.scatter(sub_c["_span"], sub_c["_carbon"], s=30, alpha=0.85, edgecolors="none")
-        ax.set_xlabel("Max span (m)")
-        ax.set_ylabel("Embodied carbon (kgCO₂e / m²)")
-        ax.set_title(f"Lowest-carbon family '{fam}': span vs carbon")
-        ax.grid(True, linestyle=":", alpha=0.4)
-        plt.tight_layout()
-        fp = figs_dir / f"lowest_family_{fam}_span_vs_carbon.png"
-        fig.savefig(fp)
-        plt.close(fig)
-        figures["lowest_family_span_vs_carbon"] = str(fp)
-
-    return figures
-
-def plot_lowest_family_per_typology(
-    df_all: pd.DataFrame,
-    out_dir: Union[str, Path]) -> Optional[str]:
-    """
-    For each typology: find the lowest-carbon system_family and plot all *successful*
-    variants for those families (span vs carbon_per_m2). Return saved filepath or None.
-    """
-    out_dir = Path(out_dir)
-    figures_dir = out_dir
-    D = _normalize_columns(df_all)
-    if "system_family" not in D.columns or "typology" not in D.columns:
-        return None
-
-    # ensure carbon exists and numeric
-    D = _ensure_carbon(D)
-    if "carbon_per_m2" not in D.columns:
-        return None
-
-    span_col = _get_span_col(D)
-    if span_col is None:
-        return None
-
-    # compute family-level minimum carbon per typology
-    fam = D.copy()
-    fam["_metric"] = pd.to_numeric(fam["carbon_per_m2"], errors="coerce")
-    fam = fam.dropna(subset=["_metric"])
-    if fam.empty:
-        return None
-
-    fam_mins = fam.groupby(["typology", "system_family"])["_metric"].min().reset_index()
-    if fam_mins.empty:
-        return None
-
-    idx = fam_mins.groupby("typology")["_metric"].idxmin()
-    chosen = fam_mins.loc[idx].reset_index(drop=True)
-    if chosen.empty:
-        return None
-
-    # Build a MultiIndex set of chosen pairs for fast membership test
-    chosen_pairs = pd.MultiIndex.from_frame(chosen[["typology", "system_family"]])
-
-    # create aligned boolean mask: test each row's (typology, system_family) membership
-    row_pairs = pd.MultiIndex.from_frame(D[["typology", "system_family"]])
-    mask = row_pairs.isin(chosen_pairs)
-
-    plot_df = D.loc[mask].copy()
-    if plot_df.empty:
-        return None
-
-    # Prepare numeric columns
-    plot_df["_span"] = pd.to_numeric(plot_df[span_col], errors="coerce")
-    plot_df["_carbon"] = pd.to_numeric(plot_df["carbon_per_m2"], errors="coerce")
-    plot_df = plot_df.dropna(subset=["_span", "_carbon"])
-    if plot_df.empty:
-        return None
-
-    # Plot span vs carbon grouped by typology:family
-    fig, ax = plt.subplots(figsize=(8, 5))
-    groups = plot_df.groupby(["typology", "system_family"])
-    for (typ, fam), g in groups:
-        label = f"{typ}:{fam}"
-        g_sorted = g.sort_values("_span")
-        ax.plot(g_sorted["_span"], g_sorted["_carbon"], marker="o", label=label, linewidth=1, alpha=0.85)
-
-    ax.set_xlabel("Span (m)")
-    ax.set_ylabel("Carbon (kgCO2 / m²)")
-    ax.set_title("Lowest family per typology — span vs carbon for chosen families")
-    ax.grid(True, linestyle=":", alpha=0.4)
-    ax.legend(fontsize=7, ncol=2)
-    out_fp = figures_dir / "lowest_family_per_typology"
-    fig.savefig(out_fp, bbox_inches="tight", dpi=150)
-    plt.close(fig)
-    return str(out_fp)
-
-def _lowest_variant_per_group(df, group_col="system_family", metric="carbon_per_m2"):
-    # return DataFrame subset consisting of the lowest carbon variant per group (successful only)
-    D = df.copy()
-    D = _ensure_carbon(D)
-    success = _ensure_success_mask(D)
-    D = D[success.fillna(False)].copy()
-    if D.empty or group_col not in D.columns:
-        return pd.DataFrame()
-    D["_metric"] = pd.to_numeric(D.get(metric), errors="coerce")
-    # drop NA metric
-    D = D.dropna(subset=["_metric"])
-    if D.empty:
-        return pd.DataFrame()
-    idx = D.groupby(group_col)["_metric"].idxmin().dropna().astype(int).tolist()
-    return D.loc[idx].copy()
-
-def plot_span_vs_total_and_carbon_for_lowest(df, group_col, figures_dir):
-    lowest = _lowest_variant_per_group(df, group_col=group_col)
-    if lowest.empty:
+    if span_col is None or carbon_col not in df_all.columns:
         return {}
-    out = {}
-    span_col = _get_span_col(df)
-    if not span_col:
-        return out
-    total_col = _infer_total_load_col(df)
-    # span vs total_load
-    if total_col:
-        fig, ax = plt.subplots(figsize=(8,5))
-        ax.scatter(lowest[span_col], pd.to_numeric(lowest[total_col], errors="coerce"), s=32)
-        ax.set_xlabel("Span (m)")
-        ax.set_ylabel("Total load (kN?)")
-        ax.set_title(f"Lowest-carbon variant per {group_col}: span vs total load")
-        ax.grid(True, linestyle=":", alpha=0.4)
-        fp = figures_dir / f"lowest_per_{group_col}_span_vs_total_load.png"
-        fig.savefig(fp, bbox_inches="tight", dpi=150)
-        plt.close(fig)
-        out["span_vs_total_"+group_col] = str(fp)
-    # span vs carbon
-    fig, ax = plt.subplots(figsize=(8,5))
-    ax.scatter(lowest[span_col], pd.to_numeric(lowest["carbon_per_m2"], errors="coerce"), s=32)
-    ax.set_xlabel("Span (m)")
-    ax.set_ylabel("Embodied carbon (kgCO₂e / m²)")
-    ax.set_title(f"Lowest-carbon variant per {group_col}: span vs carbon")
-    ax.grid(True, linestyle=":", alpha=0.4)
-    fp2 = figures_dir / f"lowest_per_{group_col}_span_vs_carbon.png"
-    fig.savefig(fp2, bbox_inches="tight", dpi=150)
-    plt.close(fig)
-    out["span_vs_carbon_"+group_col] = str(fp2)
-    return out
 
-def plot_span_vs_load_curves_by_family(
-    df: pd.DataFrame,
-    out_dir: Union[str, Path],
-    *,
-    figures_subdir: Optional[str] = None) -> Optional[str]:
-    """
-    Plot span vs total-load (or capacity) curves grouped by family (fallback to system_family).
-    Detects suitable total-load column via _infer_total_load_col (and falls back to common column names).
-    Returns saved filepath or None.
-    """
-    out_dir = Path(out_dir)
-    figures_dir = out_dir
+    df = df_all[[span_col, carbon_col]].copy()
 
-    # use helper to pick a sensible total load column
-    total_col = _infer_total_load_col(df)
-    if total_col is None:
-        # fallback heuristics
-        for c in ["total_load", "total_capacity", "sdl_total", "sdl", "ll", "total_load_synth"]:
-            if c in df.columns:
-                total_col = c
-                break
-    if total_col is None:
-        return None
+    has_pass = "pass_overall" in df_all.columns
 
-    span_col = _get_span_col(df)
-    if span_col is None:
-        return None
+    fig, ax = plt.subplots(figsize=(8, 6))
 
-    D = df.copy()
-    D["_span"] = pd.to_numeric(D[span_col], errors="coerce")
-    D["_load"] = pd.to_numeric(D[total_col], errors="coerce")
-    mask = _ensure_success_mask(D).fillna(False)
-    D = D[mask]
-    if D.empty:
-        return None
+    # Plot all faint
+    ax.scatter(df[span_col], df[carbon_col],
+               alpha=0.2, label="All candidates")
 
-    # grouping: prefer system_family, fallback to manufacturer
-    group_col = "system_family" if "system_family" in D.columns else "manufacturer"
-    groups = D.groupby(group_col)
+    if has_pass:
+        df_pass = df_all[df_all["pass_overall"] == True][[span_col, carbon_col]].copy()
 
-    fig, ax = plt.subplots(figsize=(9, 5))
-    for name, g in groups:
-        g = g.dropna(subset=["_span", "_load"])
-        if g.empty:
-            continue
-        g_sorted = g.sort_values("_span")
-        ax.plot(g_sorted["_span"], g_sorted["_load"], marker="o", label=str(name), linewidth=1, alpha=0.8)
+        ax.scatter(df_pass[span_col], df_pass[carbon_col],
+                   alpha=0.8, label="Passing")
+
+        frontier = compute_pareto_frontier(df_pass, span_col, carbon_col)
+    else:
+        frontier = compute_pareto_frontier(df, span_col, carbon_col)
+
+    if not frontier.empty:
+        ax.plot(frontier[span_col], frontier[carbon_col],
+                linewidth=2, label="Pareto frontier")
 
     ax.set_xlabel("Span (m)")
-    ax.set_ylabel("Total load / capacity (kN?)")
-    ax.set_title("Span vs Load curves by family")
-    ax.grid(True, linestyle=":", alpha=0.4)
-    ax.legend(fontsize=7, ncol=2)
-    out_fp = figures_dir
-    fig.savefig(out_fp, bbox_inches="tight", dpi=150)
+    ax.set_ylabel("Carbon (kgCO₂/m²)")
+    ax.legend()
+
+    out_path = fig_dir / "span_vs_carbon_pareto.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    return str(out_fp)
+
+    return {"span_vs_carbon_pareto": out_path}
+
+def _write_placeholder_figure(out_path: Path, message: str) -> None:
+    """Write a minimal placeholder image for empty/invalid plots."""
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.axis("off")
+    ax.text(0.02, 0.6, message, fontsize=12)
+    fig.savefig(out_path, bbox_inches="tight", dpi=200)
+    plt.close(fig)
 
 def plot_span_vs_carbon_global(df, out_fp: Path):
     try:
@@ -1325,7 +1306,8 @@ def plot_span_vs_carbon_global(df, out_fp: Path):
         if df2.empty:
             return None
         fig, ax = plt.subplots(figsize=(8,5))
-        ax.scatter(df2["_span"], df2["_carb"], s=18, alpha=0.7)
+        ax.scatter(df2["_span"], df2["_carb"], s=18, alpha=0.7, label="variants")
+        ax.legend(loc="best", frameon=False)
         ax.set_xlabel("Span (m)")
         ax.set_ylabel("Carbon (kgCO₂e / m²)")
         ax.set_title("Span vs Carbon (all variants)")
@@ -1337,6 +1319,177 @@ def plot_span_vs_carbon_global(df, out_fp: Path):
     except Exception:
         logger.exception("plot_span_vs_carbon_global failed")
         return None
+    
+def plot_depth_vs_carbon(df_all: pd.DataFrame,
+                         fig_dir: Path,
+                         carbon_col: str = "carbon_per_m2") -> Dict[str, Path]:
+
+    depth_cols = ["slab_depth", "beam_depth", "steel_depth", "screed_depth"]
+    depth_cols = [c for c in depth_cols if c in df_all.columns]
+
+    if not depth_cols:
+        return {}
+
+    df = df_all.copy()
+    df["total_depth"] = df[depth_cols].sum(axis=1)
+
+    span_col = "span" if "span" in df.columns else "max_span"
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.scatter(df["total_depth"], df[carbon_col], alpha=0.3)
+
+    ax.set_xlabel("Total structural depth (m)")
+    ax.set_ylabel("Carbon (kgCO₂/m²)")
+
+    out_path = fig_dir / "depth_vs_carbon.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return {"depth_vs_carbon": out_path}
+
+def plot_carbon_distribution_by_type(df_all: pd.DataFrame,
+                                     fig_dir: Path,
+                                     carbon_col: str = "carbon_per_m2") -> Dict[str, Path]:
+
+    if "type" not in df_all.columns:
+        return {}
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    df_all.boxplot(column=carbon_col, by="type", ax=ax)
+
+    ax.set_ylabel("Carbon (kgCO₂/m²)")
+    ax.set_title("Carbon distribution by type")
+    plt.suptitle("")
+
+    out_path = fig_dir / "carbon_distribution_by_type.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return {"carbon_distribution_by_type": out_path}
+
+def plot_feasibility_heatmap(df_all: pd.DataFrame,
+                             fig_dir: Path,
+                             carbon_col: str = "carbon_per_m2") -> Dict[str, Path]:
+
+    if "pass_overall" not in df_all.columns:
+        return {}
+
+    span_col = "span" if "span" in df_all.columns else "max_span"
+
+    df = df_all.copy()
+    df["span_bin"] = pd.cut(df[span_col], bins=8)
+    df["load_bin"] = pd.cut(df["sdl"] + df["ll"], bins=8)
+
+    pivot = df.pivot_table(index="span_bin",
+                           columns="load_bin",
+                           values="pass_overall",
+                           aggfunc="mean")
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(pivot.values, aspect="auto")
+
+    ax.set_title("Pass rate heatmap")
+    fig.colorbar(im)
+
+    out_path = fig_dir / "feasibility_heatmap.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return {"feasibility_heatmap": out_path}
+
+def plot_failure_breakdown(df_all: pd.DataFrame,
+                           fig_dir: Path) -> Dict[str, Path]:
+
+    failure_cols = [c for c in df_all.columns if c.endswith("_util")]
+
+    if not failure_cols:
+        return {}
+
+    failures = {}
+
+    for col in failure_cols:
+        failures[col] = (df_all[col] > 1.0).sum()
+
+    s = pd.Series(failures).sort_values(ascending=False)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    s.plot(kind="bar", ax=ax)
+
+    ax.set_ylabel("Count of failures")
+
+    out_path = fig_dir / "failure_breakdown.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return {"failure_breakdown": out_path}
+
+def plot_carbon_breakdown(df_all: pd.DataFrame,
+                          materials_df: pd.DataFrame,
+                          fig_dir: Path,
+                          top_n: int = 5,
+                          carbon_col: str = "carbon_per_m2") -> Dict[str, Path]:
+
+    required_cols = [
+        "material_concrete_id",
+        "material_steel_id",
+        "material_timber_id",
+        "concrete_volume",
+        "steel_volume",
+        "timber_volume",
+    ]
+
+    if not all(c in df_all.columns for c in required_cols):
+        return {}
+
+    if "ec_kgco2_per_unit" not in materials_df.columns:
+        return {}
+
+    # Build material intensity lookup
+    intensity_lookup = (
+        materials_df
+        .set_index("material_id")["ec_kgco2_per_unit"]
+        .to_dict()
+    )
+
+    df = df_all.nsmallest(top_n, carbon_col).copy()
+
+    def compute_component(row, mat_id_col, vol_col):
+        mat_id = row[mat_id_col]
+        intensity = intensity_lookup.get(mat_id, 0.0)
+        return row[vol_col] * intensity
+
+    df["carbon_concrete"] = df.apply(
+        lambda r: compute_component(r, "material_concrete_id", "concrete_volume"),
+        axis=1,
+    )
+
+    df["carbon_steel"] = df.apply(
+        lambda r: compute_component(r, "material_steel_id", "steel_volume"),
+        axis=1,
+    )
+
+    df["carbon_timber"] = df.apply(
+        lambda r: compute_component(r, "material_timber_id", "timber_volume"),
+        axis=1,
+    )
+
+    breakdown = df[
+        ["carbon_concrete", "carbon_steel", "carbon_timber"]
+    ]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    breakdown.plot(kind="bar", stacked=True, ax=ax)
+
+    ax.set_ylabel("Carbon (kgCO₂/m²)")
+    ax.set_title("Carbon breakdown – top systems")
+    ax.legend(["Concrete", "Steel", "Timber"])
+
+    out_path = fig_dir / "carbon_breakdown_top.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return {"carbon_breakdown_top": out_path}
 
 def plot_span_vs_total_load_global(df, out_fp: Path):
     span = "max_span" if "max_span" in df.columns else None
@@ -1359,7 +1512,8 @@ def plot_span_vs_total_load_global(df, out_fp: Path):
     if df2.empty:
         return None
     fig, ax = plt.subplots(figsize=(8,5))
-    ax.scatter(df2["_span"], df2["_load"], s=18, alpha=0.8)
+    ax.scatter(df2["_span"], df2["_load"], s=18, alpha=0.8, label="variants")
+    ax.legend(loc="best", frameon=False)
     ax.set_xlabel("Span (m)"); ax.set_ylabel("Total load")
     ax.set_title("Span vs Total load (all variants)")
     ax.grid(True, linestyle=":", alpha=0.4)
@@ -1368,54 +1522,646 @@ def plot_span_vs_total_load_global(df, out_fp: Path):
     plt.close(fig)
     return str(out_fp)
 
-def plot_lowest_per_group_aggregate(df, group_col, out_fp_prefix: Path):
-    # pick lowest-carbon variant per group
-    if "carbon_per_m2" not in df.columns:
-        df = df.copy()
-        if "carbon_total_kgCO2" in df.columns:
-            df["carbon_per_m2"] = pd.to_numeric(df["carbon_total_kgCO2"], errors="coerce")
-        else:
-            return {}
-    span_col = "max_span" if "max_span" in df.columns else None
-    if span_col is None or group_col not in df.columns:
-        return {}
-    D = df.copy()
-    D["_carb"] = pd.to_numeric(D["carbon_per_m2"], errors="coerce")
-    # if success filter desired: D = D[_ensure_success_mask(D)]
-    D = D.dropna(subset=["_carb"])
+
+
+
+def plot_lowest_family_per_typology(
+    df_all: pd.DataFrame,
+    out_dir: Union[str, Path],
+    *,
+    success_only: bool = False,
+    metric: str = "carbon_per_m2",
+) -> Optional[str]:
+    """For each typology, pick the lowest-carbon system_family and plot its curve(s).
+
+    Output is a single figure: span vs carbon for the chosen families (one line per typology:family).
+    """
+    if df_all is None or df_all.empty:
+        return None
+
+    out_dir = Path(out_dir)
+    out_fp = out_dir / "lowest_family_per_typology.png"
+    out_fp.parent.mkdir(parents=True, exist_ok=True)
+
+    D = _normalize_columns(df_all)
+    if "system_family" not in D.columns or "typology" not in D.columns:
+        _write_placeholder_figure(out_fp, "Missing 'system_family' or 'typology' columns.")
+        return str(out_fp)
+
+    try:
+        D = _ensure_carbon(D)
+    except KeyError:
+        _write_placeholder_figure(out_fp, "No carbon column found.")
+        return str(out_fp)
+
+    span_col = _get_span_col(D)
+    if span_col is None:
+        _write_placeholder_figure(out_fp, "No span column found (expected 'max_span').")
+        return str(out_fp)
+
+    D["_span"] = pd.to_numeric(D[span_col], errors="coerce")
+    D["_carbon"] = pd.to_numeric(D["carbon_per_m2"], errors="coerce")
+    D = D.dropna(subset=["_span", "_carbon"])
+
+    if success_only:
+        D = D[_ensure_success_mask(D).fillna(False)].copy()
+
     if D.empty:
-        return {}
+        _write_placeholder_figure(out_fp, "No rows after filtering.")
+        return str(out_fp)
+
+    fam_mins = (
+        D.groupby(["typology", "system_family"])["_carbon"]
+        .min()
+        .reset_index()
+    )
+    if fam_mins.empty:
+        _write_placeholder_figure(out_fp, "No typology/family minima.")
+        return str(out_fp)
+
+    chosen_idx = fam_mins.groupby("typology")["_carbon"].idxmin()
+    chosen = fam_mins.loc[chosen_idx].reset_index(drop=True)
+    if chosen.empty:
+        _write_placeholder_figure(out_fp, "No chosen families.")
+        return str(out_fp)
+
+    chosen_pairs = pd.MultiIndex.from_frame(chosen[["typology", "system_family"]])
+    row_pairs = pd.MultiIndex.from_frame(D[["typology", "system_family"]])
+    plot_df = D.loc[row_pairs.isin(chosen_pairs)].copy()
+    if plot_df.empty:
+        _write_placeholder_figure(out_fp, "No rows for chosen families.")
+        return str(out_fp)
+
+    fig, ax = plt.subplots(figsize=(9, 5.8))
+    for (typ, fam), g in plot_df.groupby(["typology", "system_family"]):
+        g = g.sort_values("_span")
+        ax.plot(g["_span"], g["_carbon"], marker="o", linewidth=1.6, alpha=0.9, label=f"{typ}: {fam}")
+
+    ax.set_xlabel("Span (m)")
+    ax.set_ylabel("Embodied carbon (kgCO₂e / m²)")
+    ax.set_title("Lowest-carbon family per typology — span vs carbon")
+    ax.grid(True, linestyle=":", alpha=0.35)
+    ax.legend(fontsize=7, ncol=2, frameon=False)
+    plt.tight_layout()
+    fig.savefig(out_fp, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+    return str(out_fp)
+
+def plot_lowest_family_per_type(
+    df_all: pd.DataFrame,
+    out_dir: Union[str, Path],
+    *,
+    success_only: bool = False,
+    metric: str = "carbon_per_m2",
+) -> Optional[str]:
+    """For each type, pick the lowest-carbon system_family and plot its curve(s).
+
+    Output is a single figure: span vs carbon for the chosen families (one line per type:family).
+    """
+    if df_all is None or df_all.empty:
+        return None
+
+    out_dir = Path(out_dir)
+    out_fp = out_dir / "lowest_family_per_type.png"
+    out_fp.parent.mkdir(parents=True, exist_ok=True)
+
+    D = _normalize_columns(df_all)
+    if "system_family" not in D.columns or "type" not in D.columns:
+        _write_placeholder_figure(out_fp, "Missing 'system_family' or 'type' columns.")
+        return str(out_fp)
+
+    try:
+        D = _ensure_carbon(D)
+    except KeyError:
+        _write_placeholder_figure(out_fp, "No carbon column found.")
+        return str(out_fp)
+
+    span_col = _get_span_col(D)
+    if span_col is None:
+        _write_placeholder_figure(out_fp, "No span column found (expected 'max_span').")
+        return str(out_fp)
+
+    D["_span"] = pd.to_numeric(D[span_col], errors="coerce")
+    D["_carbon"] = pd.to_numeric(D["carbon_per_m2"], errors="coerce")
+    D = D.dropna(subset=["_span", "_carbon"])
+
+    if success_only:
+        D = D[_ensure_success_mask(D).fillna(False)].copy()
+
+    if D.empty:
+        _write_placeholder_figure(out_fp, "No rows after filtering.")
+        return str(out_fp)
+
+    fam_mins = (
+        D.groupby(["type", "system_family"])["_carbon"]
+        .min()
+        .reset_index()
+    )
+    if fam_mins.empty:
+        _write_placeholder_figure(out_fp, "No type/family minima.")
+        return str(out_fp)
+
+    chosen_idx = fam_mins.groupby("type")["_carbon"].idxmin()
+    chosen = fam_mins.loc[chosen_idx].reset_index(drop=True)
+    if chosen.empty:
+        _write_placeholder_figure(out_fp, "No chosen families.")
+        return str(out_fp)
+
+    chosen_pairs = pd.MultiIndex.from_frame(chosen[["type", "system_family"]])
+    row_pairs = pd.MultiIndex.from_frame(D[["type", "system_family"]])
+    plot_df = D.loc[row_pairs.isin(chosen_pairs)].copy()
+    if plot_df.empty:
+        _write_placeholder_figure(out_fp, "No rows for chosen families.")
+        return str(out_fp)
+
+    fig, ax = plt.subplots(figsize=(9, 5.8))
+    for (typ, fam), g in plot_df.groupby(["type", "system_family"]):
+        g = g.sort_values("_span")
+        ax.plot(g["_span"], g["_carbon"], marker="o", linewidth=1.6, alpha=0.9, label=f"{typ}: {fam}")
+
+    ax.set_xlabel("Span (m)")
+    ax.set_ylabel("Embodied carbon (kgCO₂e / m²)")
+    ax.set_title("Lowest-carbon family per type — span vs carbon")
+    ax.grid(True, linestyle=":", alpha=0.35)
+    ax.legend(fontsize=7, ncol=2, frameon=False)
+    plt.tight_layout()
+    fig.savefig(out_fp, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+    return str(out_fp)
+
+
+def _lowest_variant_per_group(
+    df: pd.DataFrame,
+    *,
+    group_col: str = "system_family",
+    metric: str = "carbon_per_m2",
+    success_only: bool = False,
+) -> pd.DataFrame:
+    """Return one row per group: the lowest-metric variant in that group."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    D = df.copy()
+    try:
+        D = _ensure_carbon(D)
+    except KeyError:
+        return pd.DataFrame()
+
+    if group_col not in D.columns:
+        return pd.DataFrame()
+
+    if success_only:
+        D = D[_ensure_success_mask(D).fillna(False)].copy()
+
+    D["_metric"] = pd.to_numeric(D.get(metric), errors="coerce")
+    D = D.dropna(subset=["_metric"])
+    if D.empty:
+        return pd.DataFrame()
+
+    idx = D.groupby(group_col)["_metric"].idxmin().dropna().astype(int).tolist()
+    if not idx:
+        return pd.DataFrame()
+
+    return D.loc[idx].copy()
+
+
+def plot_span_vs_total_and_carbon_for_lowest(
+    df: pd.DataFrame,
+    group_col: str,
+    figures_dir: Union[str, Path],
+    *,
+    success_only: bool = False,
+) -> Dict[str, str]:
+    """Two scatters for the lowest-carbon variant per group: span vs total_load and span vs carbon."""
+    out: Dict[str, str] = {}
+    if df is None or df.empty:
+        return out
+
+    figures_dir = Path(figures_dir)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    lowest = _lowest_variant_per_group(df, group_col=group_col, success_only=success_only)
+    if lowest.empty:
+        return out
+
+    span_col = _get_span_col(lowest)
+    if not span_col:
+        return out
+
+    lowest = lowest.copy()
+    lowest["_span"] = pd.to_numeric(lowest[span_col], errors="coerce")
+
+    total_col = _infer_total_load_col(lowest)
+    if total_col:
+        lowest["_total"] = pd.to_numeric(lowest[total_col], errors="coerce")
+        sub = lowest.dropna(subset=["_span", "_total"])
+        if not sub.empty:
+            fig, ax = plt.subplots(figsize=(8.5, 5.5))
+            ax.scatter(sub["_span"], sub["_total"], s=34, alpha=0.9, edgecolors="none", label="lowest per group")
+            ax.legend(loc="best", frameon=False)
+            ax.set_xlabel("Span (m)")
+            ax.set_ylabel("Total load")
+            ax.set_title(f"Lowest-carbon variant per {group_col}: span vs total load")
+            ax.grid(True, linestyle=":", alpha=0.4)
+            fp = figures_dir / f"lowest_per_{group_col}_span_vs_total_load.png"
+            fig.savefig(fp, bbox_inches="tight", dpi=200)
+            plt.close(fig)
+            out[f"lowest_per_{group_col}_span_vs_total_load"] = str(fp)
+
+    lowest["_carbon"] = pd.to_numeric(lowest.get("carbon_per_m2"), errors="coerce")
+    sub = lowest.dropna(subset=["_span", "_carbon"])
+    if not sub.empty:
+        fig, ax = plt.subplots(figsize=(8.5, 5.5))
+        ax.scatter(sub["_span"], sub["_carbon"], s=34, alpha=0.9, edgecolors="none", label="lowest per group")
+        ax.legend(loc="best", frameon=False)
+        ax.set_xlabel("Span (m)")
+        ax.set_ylabel("Embodied carbon (kgCO₂e / m²)")
+        ax.set_title(f"Lowest-carbon variant per {group_col}: span vs carbon")
+        ax.grid(True, linestyle=":", alpha=0.4)
+        fp = figures_dir / f"lowest_per_{group_col}_span_vs_carbon.png"
+        fig.savefig(fp, bbox_inches="tight", dpi=200)
+        plt.close(fig)
+        out[f"lowest_per_{group_col}_span_vs_carbon"] = str(fp)
+
+    return out
+
+
+def plot_span_vs_load_curves_by_family_grid(
+    df: pd.DataFrame,
+    out_fp: Union[str, Path],
+    *,
+    max_families: int = 12,
+    ncols: int = 3,
+    success_only: bool = True,
+    highlight_variants: Optional[Union[set[str], List[str]]] = None,
+) -> Optional[str]:
+    """Small-multiples grid: span vs total_load curves, one panel per family."""
+    if df is None or df.empty:
+        return None
+
+    out_fp = Path(out_fp)
+    out_fp.parent.mkdir(parents=True, exist_ok=True)
+
+    span_col = _get_span_col(df)
+    if not span_col:
+        _write_placeholder_figure(out_fp, "No span column found.")
+        return str(out_fp)
+
+    D = df.copy()
+    total_col = _infer_total_load_col(D)
+    if total_col is None:
+        _write_placeholder_figure(out_fp, "No total load column found.")
+        return str(out_fp)
+
+    D["_span"] = pd.to_numeric(D[span_col], errors="coerce")
+    D["_load"] = pd.to_numeric(D[total_col], errors="coerce")
+    D = D.dropna(subset=["_span", "_load"])
+
+    if success_only:
+        D = D[_ensure_success_mask(D).fillna(False)].copy()
+
+    if D.empty:
+        _write_placeholder_figure(out_fp, "No rows after filtering.")
+        return str(out_fp)
+
+    family_col = "system_family" if "system_family" in D.columns else ("manufacturer" if "manufacturer" in D.columns else None)
+    if family_col is None:
+        _write_placeholder_figure(out_fp, "No family column found.")
+        return str(out_fp)
+
+    variant_col = "system_variant" if "system_variant" in D.columns else family_col
+
+    hv: set[str] = set(str(x) for x in (highlight_variants or []))
+
+    families: List[str] = []
+    if hv and "system_variant" in D.columns:
+        fams_h = (
+            D[D["system_variant"].astype(str).isin(hv)][family_col]
+            .dropna().astype(str).unique().tolist()
+        )
+        families.extend(fams_h)
+
+    counts = D[family_col].astype(str).value_counts()
+    for fam in counts.index.tolist():
+        if fam not in families:
+            families.append(fam)
+
+    families = families[:max_families]
+    if not families:
+        _write_placeholder_figure(out_fp, "No families to plot.")
+        return str(out_fp)
+
+    n = len(families)
+    ncols = max(1, int(ncols))
+    nrows = int(np.ceil(n / ncols))
+
+    fig_w = 4.2 * ncols
+    fig_h = 2.8 * nrows
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(fig_w, fig_h), sharex=True, sharey=True)
+    axes = np.array(axes).reshape(-1)
+
+    for i, fam in enumerate(families):
+        ax = axes[i]
+        sub_f = D[D[family_col].astype(str) == str(fam)].copy()
+        if sub_f.empty:
+            ax.set_axis_off()
+            continue
+
+        for vname, sub_v in sub_f.groupby(variant_col):
+            sub_v = sub_v.sort_values("_span")
+            if sub_v.empty:
+                continue
+            is_h = str(vname) in hv if hv else False
+            ax.plot(
+                sub_v["_span"],
+                sub_v["_load"],
+                marker="o" if is_h else None,
+                linewidth=2.2 if is_h else 1.0,
+                alpha=0.95 if is_h else 0.25,
+            )
+
+        ax.set_title(str(fam), fontsize=10)
+        ax.grid(True, linestyle=":", alpha=0.3)
+
+    for j in range(n, len(axes)):
+        axes[j].set_axis_off()
+
+    fig.supxlabel("Span (m)")
+    fig.supylabel("Total load / capacity")
+    fig.suptitle("Span vs Load curves by family (small multiples)", y=1.02, fontsize=12)
+    plt.tight_layout()
+    fig.savefig(out_fp, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+    return str(out_fp)
+
+
+def plot_span_vs_load_curves_by_family_highlight(
+    df: pd.DataFrame,
+    out_fp: Union[str, Path],
+    *,
+    success_only: bool = True,
+    highlight_variants: Optional[Union[set[str], List[str]]] = None,
+    base_alpha: float = 0.12,
+) -> Optional[str]:
+    """Highlight + context plot: all curves grey, highlighted curves emphasized."""
+    if df is None or df.empty:
+        return None
+
+    out_fp = Path(out_fp)
+    out_fp.parent.mkdir(parents=True, exist_ok=True)
+
+    span_col = _get_span_col(df)
+    if not span_col:
+        _write_placeholder_figure(out_fp, "No span column found.")
+        return str(out_fp)
+
+    D = df.copy()
+    total_col = _infer_total_load_col(D)
+    if total_col is None:
+        _write_placeholder_figure(out_fp, "No total load column found.")
+        return str(out_fp)
+
+    D["_span"] = pd.to_numeric(D[span_col], errors="coerce")
+    D["_load"] = pd.to_numeric(D[total_col], errors="coerce")
+    D = D.dropna(subset=["_span", "_load"])
+
+    if success_only:
+        D = D[_ensure_success_mask(D).fillna(False)].copy()
+
+    if D.empty:
+        _write_placeholder_figure(out_fp, "No rows after filtering.")
+        return str(out_fp)
+
+    family_col = "system_family" if "system_family" in D.columns else ("manufacturer" if "manufacturer" in D.columns else None)
+    variant_col = "system_variant" if "system_variant" in D.columns else family_col
+    if family_col is None or variant_col is None:
+        _write_placeholder_figure(out_fp, "No family/variant column found.")
+        return str(out_fp)
+
+    hv: set[str] = set(str(x) for x in (highlight_variants or []))
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for vname, sub_v in D.groupby(variant_col):
+        sub_v = sub_v.sort_values("_span")
+        ax.plot(sub_v["_span"], sub_v["_load"], linewidth=1.0, alpha=base_alpha, color="0.5")
+
+    if hv:
+        D_h = D[D[variant_col].astype(str).isin(hv)].copy()
+        if not D_h.empty:
+            for fam, sub_f in D_h.groupby(family_col):
+                for vname, sub_v in sub_f.groupby(variant_col):
+                    sub_v = sub_v.sort_values("_span")
+                    ax.plot(sub_v["_span"], sub_v["_load"], marker="o", linewidth=2.2, alpha=0.95, label=str(fam))
+
+            handles, labels = ax.get_legend_handles_labels()
+            uniq: Dict[str, Any] = {}
+            for h, l in zip(handles, labels):
+                if l not in uniq:
+                    uniq[l] = h
+            if uniq:
+                ax.legend(uniq.values(), uniq.keys(), title=family_col, fontsize=8, loc="best", frameon=False)
+
+    ax.set_xlabel("Span (m)")
+    ax.set_ylabel("Total load / capacity")
+    ax.set_title("Span vs Load curves (highlight + context)")
+    ax.grid(True, linestyle=":", alpha=0.35)
+
+    plt.tight_layout()
+    fig.savefig(out_fp, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+    return str(out_fp)
+
+
+def plot_span_vs_load_curves_by_family(
+    df: pd.DataFrame,
+    out_fp: Union[str, Path],
+    *,
+    group_by: str = "system_family",
+    show_legend: bool = True,
+    success_only: bool = True,
+    title: str = "Span vs Load curves",
+) -> Optional[str]:
+    """Single plot: span vs total_load curves grouped by family/manufacturer/system_family."""
+    if df is None or df.empty:
+        return None
+
+    out_fp = Path(out_fp)
+    out_fp.parent.mkdir(parents=True, exist_ok=True)
+
+    span_col = _get_span_col(df)
+    if not span_col:
+        _write_placeholder_figure(out_fp, "No span column found.")
+        return str(out_fp)
+
+    D = df.copy()
+    total_col = _infer_total_load_col(D)
+    if total_col is None:
+        _write_placeholder_figure(out_fp, "No total load column found.")
+        return str(out_fp)
+
+    if group_by not in D.columns:
+        group_by = "manufacturer" if "manufacturer" in D.columns else ("system_family" if "system_family" in D.columns else group_by)
+        if group_by not in D.columns:
+            _write_placeholder_figure(out_fp, f"Missing grouping column: {group_by}")
+            return str(out_fp)
+
+    D["_span"] = pd.to_numeric(D[span_col], errors="coerce")
+    D["_load"] = pd.to_numeric(D[total_col], errors="coerce")
+    D = D.dropna(subset=["_span", "_load"])
+
+    if success_only:
+        D = D[_ensure_success_mask(D).fillna(False)].copy()
+
+    if D.empty:
+        _write_placeholder_figure(out_fp, "No rows after filtering.")
+        return str(out_fp)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for name, g in D.groupby(group_by):
+        g = g.sort_values("_span")
+        ax.plot(g["_span"], g["_load"], marker="o", linewidth=1.2, alpha=0.75, label=str(name))
+
+    ax.set_xlabel("Span (m)")
+    ax.set_ylabel("Total load / capacity")
+    ax.set_title(title)
+    ax.grid(True, linestyle=":", alpha=0.35)
+
+    if show_legend:
+        ax.legend(fontsize=7, ncol=2, frameon=False)
+
+    plt.tight_layout()
+    fig.savefig(out_fp, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+    return str(out_fp)
+
+
+def plot_lowest_per_group_aggregate(
+    df: pd.DataFrame,
+    group_col: str,
+    out_dir: Path,
+    *,
+    color_by: Optional[str] = None,
+    show_legend: bool = False,
+) -> Dict[str, str]:
+    """Pick the lowest-carbon variant per group and plot aggregate scatters.
+
+    Saves:
+      - lowest_per_<group>_span_vs_carbon_aggregate.png
+      - lowest_per_<group>_span_vs_total_load_aggregate.png (if total load available)
+    """
+    out: Dict[str, str] = {}
+    if df is None or df.empty:
+        return out
+
+    D = _ensure_carbon(df)
+    span_col = "max_span" if "max_span" in D.columns else None
+    if span_col is None or group_col not in D.columns:
+        return out
+
+    D = D.copy()
+    D["_carb"] = pd.to_numeric(D["carbon_per_m2"], errors="coerce")
+    D = D.dropna(subset=["_carb", span_col])
+    if D.empty:
+        return out
+
     idx = D.groupby(group_col)["_carb"].idxmin().dropna().astype(int).tolist()
-    lowest = D.loc[idx]
-    out = {}
-    # span vs carbon aggregated
-    fig, ax = plt.subplots(figsize=(8,5))
-    ax.scatter(lowest[span_col], lowest["_carb"], s=26, alpha=0.9)
-    for i,r in lowest.iterrows():
-        ax.text(r[span_col], r["_carb"], str(r.get("system_family","")), fontsize=7, alpha=0.8)
-    ax.set_xlabel("Span (m)"); ax.set_ylabel("Carbon (kgCO₂e / m²)")
+    if not idx:
+        return out
+    lowest = D.loc[idx].copy()
+
+    # Choose color grouping
+    if color_by and color_by in lowest.columns:
+        ccol = color_by
+    elif "manufacturer" in lowest.columns:
+        ccol = "manufacturer"
+    else:
+        ccol = group_col
+
+    cats = lowest[ccol].astype(str).fillna("Unknown")
+    uniq = sorted(cats.unique())
+    cmap = plt.get_cmap("tab20")
+    colmap = {u: cmap(i % cmap.N) for i, u in enumerate(uniq)}
+    colors = [colmap[v] for v in cats]
+    legend_handles = [plt.Line2D([0], [0], marker="o", linestyle="", markersize=7, color=colmap[u], label=u)
+                      for u in uniq]
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # span vs carbon aggregated (no labels)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.scatter(lowest[span_col], lowest["_carb"], s=34, alpha=0.9, c=colors, edgecolors="none")
+    ax.set_xlabel("Span (m)")
+    ax.set_ylabel("Carbon (kgCO₂e / m²)")
     ax.set_title(f"Lowest-carbon variant per {group_col}: span vs carbon")
     ax.grid(True, linestyle=":", alpha=0.4)
-    fp = out_fp_prefix / f"lowest_per_{group_col}_span_vs_carbon_aggregate.png"
-    fig.savefig(fp, bbox_inches="tight", dpi=150)
+    if show_legend:
+        ax.legend(handles=legend_handles, title=ccol, loc="best", frameon=False)
+    fp = out_dir / f"lowest_per_{group_col}_span_vs_carbon_aggregate.png"
+    fig.savefig(fp, bbox_inches="tight", dpi=200)
     plt.close(fig)
-    out["lowest_agg_carbon_"+group_col] = str(fp)
+    out["lowest_agg_carbon_" + group_col] = str(fp)
+
     # span vs total load aggregated (if total exists)
-    total_col = None
-    for c in ["total_load","total_capacity","sdl_total","sdl","ll","total_load_synth"]:
-        if c in df.columns:
-            total_col = c; break
-    if total_col:
-        fig, ax = plt.subplots(figsize=(8,5))
-        ax.scatter(lowest[span_col], pd.to_numeric(lowest[total_col], errors="coerce"), s=26)
-        ax.set_xlabel("Span (m)"); ax.set_ylabel("Total load")
+    total_col = _infer_total_load_col(lowest)
+    if total_col and total_col in lowest.columns:
+        vals = pd.to_numeric(lowest[total_col], errors="coerce")
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.scatter(lowest[span_col], vals, s=34, alpha=0.9, c=colors, edgecolors="none", label="lowest per group")
+        ax.legend(loc="best", frameon=False)
+        ax.set_xlabel("Span (m)")
+        ax.set_ylabel("Total load")
         ax.set_title(f"Lowest-carbon variant per {group_col}: span vs total load")
         ax.grid(True, linestyle=":", alpha=0.4)
-        fp2 = out_fp_prefix / f"lowest_per_{group_col}_span_vs_total_load_aggregate.png"
-        fig.savefig(fp2, bbox_inches="tight", dpi=150)
+        if show_legend:
+            ax.legend(handles=legend_handles, title=ccol, loc="best", frameon=False)
+        fp2 = out_dir / f"lowest_per_{group_col}_span_vs_total_load_aggregate.png"
+        fig.savefig(fp2, bbox_inches="tight", dpi=200)
         plt.close(fig)
-        out["lowest_agg_load_"+group_col] = str(fp2)
+        out["lowest_agg_load_" + group_col] = str(fp2)
+
     return out
+
+
+
+def plot_lowest_family_variants(df: pd.DataFrame, out_dir: Path) -> Dict[str, str]:
+    """Backwards-compatible wrapper used by older report pipelines.
+
+    Generates 'lowest per system_family' and 'lowest per manufacturer' aggregate scatters.
+    Returns a dict of figure paths.
+    """
+    out: Dict[str, str] = {}
+    if df is None or len(df) == 0:
+        return out
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure we have a usable total load column for total-load plots
+    D = df.copy()
+    if _infer_total_load_col(D) is None:
+        # common case in this project: sdl + ll
+        if "sdl" in D.columns and "ll" in D.columns:
+            D["total_load"] = pd.to_numeric(D["sdl"], errors="coerce") + pd.to_numeric(D["ll"], errors="coerce")
+
+    # Lowest per system_family
+    if "system_family" in D.columns:
+        out.update(plot_lowest_per_group_aggregate(
+            D, "system_family", out_dir,
+            color_by="manufacturer" if "manufacturer" in D.columns else None,
+            show_legend=False,
+        ))
+
+    # Lowest per manufacturer
+    if "manufacturer" in D.columns:
+        out.update(plot_lowest_per_group_aggregate(
+            D, "manufacturer", out_dir,
+            color_by="manufacturer",
+            show_legend=False,
+        ))
+
+    return out
+
 
 # ------------------------
 # Public API
@@ -1594,13 +2340,17 @@ def write_edca_reports(
             table_paths[name] = str(fp)
         except Exception as e:
             logger.warning("[reporting] failed to save table %s: %s", name, e)
-
+    
+    print("Reporting columns:", df_all.columns.tolist())
+    
     # figures
     figure_paths: Dict[str, str] = {}
     p = plot_bar_best_by_group(
         tables["best_per_type"], "type", "carbon_per_m2",
         dirs["figures"] / "bar_best_per_type.png",
         title="Best (lowest-carbon) variant per type",
+        color_by="type",
+        show_legend=False,
     )
     if p:
         figure_paths["bar_best_per_type"] = p
@@ -1658,6 +2408,10 @@ def write_edca_reports(
     if p:
         figure_paths["lowest_family_per_typology"] = p
 
+    p = plot_lowest_family_per_type(df_all, dirs["figures"])
+    if p:
+        figure_paths["lowest_family_per_type"] = p
+
     p = plot_span_vs_carbon_global(df_all, dirs["figures"] / "span_vs_carbon.png")
     if p:
         figure_paths["span_vs_carbon"] = p
@@ -1665,12 +2419,228 @@ def write_edca_reports(
     p = plot_span_vs_total_load_global(df_all, dirs["figures"] / "span_vs_total_load.png")
     if p: figure_paths["span_vs_total_load"] = p
 
-    figure_paths.update(plot_lowest_per_group_aggregate(df_all, "system_family", dirs["figures"]))
+    figure_paths.update(plot_lowest_per_group_aggregate(df_all, "system_family", dirs["figures"], color_by="manufacturer" if "manufacturer" in df_all.columns else "system_family", show_legend=True))
     if "manufacturer" in df_all.columns:
-        figure_paths.update(plot_lowest_per_group_aggregate(df_all, "manufacturer", dirs["figures"]))
+        figure_paths.update(plot_lowest_per_group_aggregate(df_all, "manufacturer", dirs["figures"], color_by="manufacturer", show_legend=True))
+    # Diagnostics plot (kept as-is)
+    p = plot_span_vs_load_curves_by_family(
+        df_all,
+        dirs["figures"] / "span_vs_load_curves_by_family.png",
+        group_by="system_family",
+        show_legend=True,
+        success_only=True,
+    )
+    if p:
+        figure_paths["span_vs_load_curves_by_family"] = p
 
-    p = plot_span_vs_load_curves_by_family(df_all, dirs["figures"] / "span_vs_load_curves_by_family.png")
-    if p: figure_paths["span_vs_load_curves_by_family"] = p
+    # Additional requested copies:
+    p = plot_span_vs_load_curves_by_family(
+        df_all,
+        dirs["figures"] / "span_vs_load_curves_by_family_no_legend.png",
+        group_by="system_family",
+        show_legend=False,
+        success_only=True,
+        title="Span vs Load curves by family (no legend)",
+    )
+    if p:
+        figure_paths["span_vs_load_curves_by_family_no_legend"] = p
+
+    '''
+    p = plot_span_vs_load_curves_by_family(
+        df_all,
+        dirs["figures"] / "span_vs_load_curves_by_manufacturer_no_legend.png",
+        group_by="manufacturer",
+        show_legend=False,
+        success_only=True,
+        title="Span vs Load curves by manufacturer (no legend)",
+    )
+    if p:
+        figure_paths["span_vs_load_curves_by_manufacturer_no_legend"] = p
+    '''
+
+    figure_paths.update(plot_span_vs_carbon_pareto(df_all, dirs["figures"]))
+    figure_paths.update(plot_depth_vs_carbon(df_all, dirs["figures"]))
+    figure_paths.update(plot_carbon_distribution_by_type(df_all, dirs["figures"]))
+    figure_paths.update(plot_feasibility_heatmap(df_all, dirs["figures"]))
+    figure_paths.update(plot_failure_breakdown(df_all, dirs["figures"]))
+
+    # load materials
+    materials_df = pd.read_parquet("inputs/canonical/materials.parquet")
+    figure_paths.update(plot_carbon_breakdown(df_all, materials_df, dirs["figures"]))
+
+    # ------------------------------------------------------------
+    # Duplicate ALL figures with a non-negative carbon constraint
+    # ------------------------------------------------------------
+    try:
+        df_nn = _ensure_carbon(df_all)
+        df_nn = df_nn.copy()
+        df_nn["carbon_per_m2"] = pd.to_numeric(df_nn["carbon_per_m2"], errors="coerce")
+        df_nn = df_nn[df_nn["carbon_per_m2"] > 0].copy()
+
+        # If nothing remains, still emit placeholder figures so the directory isn't empty
+        if df_nn.empty:
+            nn_root = Path(out_dir) / "non-negative-carbon"
+            nn_dirs = _ensure_report_dirs(nn_root)
+            msg = "No rows with carbon_per_m2 > 0 after filtering"
+            for fn in [
+                "scatter_successful_span_vs_carbon_by_type.png",
+                "scatter_all_span_vs_carbon_by_type.png",
+                "lowest_per_system_family_span_vs_carbon_aggregate.png",
+                "lowest_per_system_family_span_vs_total_load_aggregate.png",
+            ]:
+                fig, ax = plt.subplots(figsize=(8, 3))
+                ax.axis("off")
+                ax.text(0.02, 0.6, msg, fontsize=12)
+                fig.savefig(nn_dirs["figures"] / fn, bbox_inches="tight", dpi=200)
+                plt.close(fig)
+            # continue without raising
+
+        nn_root = Path(out_dir) / "non-negative-carbon"
+        nn_dirs = _ensure_report_dirs(nn_root)
+
+        # Recompute best tables under the constraint (so bar charts reflect positive-only winners)
+        best_type_nn = table_best_variant_per_group(df_nn, "type", metric=metric)
+        best_typology_nn = table_best_variant_per_group(df_nn, "typology", metric=metric)
+
+        # Bar charts (positive-only)
+        plot_bar_best_by_group(
+            best_type_nn, "type", "carbon_per_m2",
+            nn_dirs["figures"] / "bar_best_per_type.png",
+            title="Best (lowest-carbon) variant per type (positive only)",
+            orientation="h",
+            add_value_labels=True,
+            color_by="type" if "type" in best_type_nn.columns else None,
+            show_legend=False,
+        )
+        plot_bar_best_by_group(
+            best_typology_nn, "typology", "carbon_per_m2",
+            nn_dirs["figures"] / "bar_best_per_typology.png",
+            title="Best (lowest-carbon) variant per typology (positive only)",
+            orientation="v",
+            add_value_labels=True,
+            color_by="type" if "type" in best_typology_nn.columns else None,
+            show_legend=False,
+        )
+
+        # Scatter: successful + all + highlights
+        plot_span_vs_carbon_colored(
+            df_nn,
+            nn_dirs["figures"] / "scatter_successful_span_vs_carbon_by_type.png",
+            success_only=True,
+            color_by="type",
+            positive_only=True,
+            title="Successful system_variants (positive only): span vs embodied carbon (colored by type)",
+        )
+        plot_span_vs_carbon_colored(
+            df_nn,
+            nn_dirs["figures"] / "scatter_all_span_vs_carbon_by_type.png",
+            success_only=False,
+            color_by="type",
+            positive_only=True,
+            title="All system_variants (positive only): span vs embodied carbon (colored by type)",
+        )
+        if selected_variants:
+            plot_span_vs_carbon_colored(
+                df_nn,
+                nn_dirs["figures"] / "scatter_all_span_vs_carbon_by_type_selected_highlight.png",
+                success_only=False,
+                color_by="type",
+                positive_only=True,
+                highlight_variants=selected_variants,
+                title="All system_variants (positive only): selected highlighted (others grey)",
+            )
+
+        # Aggregate "lowest per group" plots (positive-only)
+        plot_lowest_per_group_aggregate(
+            df_nn, "manufacturer", nn_dirs["figures"],
+            color_by="manufacturer", show_legend=True,
+        )
+        plot_lowest_per_group_aggregate(
+            df_nn, "system_family", nn_dirs["figures"],
+            color_by="manufacturer" if "manufacturer" in df_nn.columns else "system_family",
+            show_legend=True,
+        )
+
+        if "type" in df_nn.columns:
+            _filtered_types = ["solid_plank", "hollowcore", "double_tee", "composite_deck"]
+            _present = [t for t in _filtered_types if (df_nn["type"].astype(str) == t).any()]
+            if _present:
+                df_f = df_nn[df_nn["type"].astype(str).isin(_present)].copy()
+                plot_span_vs_carbon_colored(
+                    df_f,
+                    nn_dirs["figures"] / "scatter_filtered_span_vs_carbon_by_type_selected_highlight.png",
+                    success_only=False,
+                    color_by="type",
+                    positive_only=True,
+                    highlight_variants=selected_variants,
+                    title="Filtered types (positive only): selected highlighted (others grey)",
+                )
+
+        # Lowest-family / aggregate plots
+        plot_lowest_family_variants(df_nn, nn_dirs["figures"])
+        plot_span_vs_carbon_by_type(df_nn, nn_dirs["figures"] / "span_vs_carbon_by_type.png", label_prefix="")
+        plot_span_vs_carbon_by_type(df_nn, nn_dirs["figures"] / "span_vs_carbon_all.png", label_prefix="")
+        plot_span_vs_carbon_by_type(df_nn, nn_dirs["figures"] / "span_vs_carbon_successful.png", success_only=True)
+
+        plot_span_vs_total_and_carbon_for_lowest(df_nn, "system_family", nn_dirs["figures"])
+        if "manufacturer" in df_nn.columns:
+            plot_span_vs_total_and_carbon_for_lowest(df_nn, "manufacturer", nn_dirs["figures"])
+
+        plot_lowest_family_per_typology(df_nn, nn_dirs["figures"])
+        plot_span_vs_carbon_global(df_nn, nn_dirs["figures"] / "span_vs_carbon.png")
+        plot_span_vs_total_load_global(df_nn, nn_dirs["figures"] / "span_vs_total_load.png")
+
+        plot_lowest_per_group_aggregate(df_nn, "system_family", nn_dirs["figures"])
+        if "manufacturer" in df_nn.columns:
+            plot_lowest_per_group_aggregate(df_nn, "manufacturer", nn_dirs["figures"])
+
+        # Span vs load curves (same set, computed on positive-only df for consistency)
+        plot_span_vs_load_curves_by_family_grid(
+            df_nn,
+            nn_dirs["figures"] / "span_vs_load_curves_by_family_grid.png",
+            max_families=12,
+            ncols=3,
+            success_only=True,
+            highlight_variants=selected_variants if selected_variants else None,
+        )
+        plot_span_vs_load_curves_by_family_highlight(
+            df_nn,
+            nn_dirs["figures"] / "span_vs_load_curves_by_family_highlight.png",
+            success_only=True,
+            highlight_variants=selected_variants if selected_variants else None,
+        )
+        plot_span_vs_load_curves_by_family(
+            df_nn,
+            nn_dirs["figures"] / "span_vs_load_curves_by_family.png",
+            group_by="system_family",
+            show_legend=True,
+            success_only=True,
+        )
+        plot_span_vs_load_curves_by_family(
+            df_nn,
+            nn_dirs["figures"] / "span_vs_load_curves_by_family_no_legend.png",
+            group_by="system_family",
+            show_legend=False,
+            success_only=True,
+            title="Span vs Load curves by family (no legend)",
+        )
+        
+        '''
+        plot_span_vs_load_curves_by_family(
+            df_nn,
+            nn_dirs["figures"] / "span_vs_load_curves_by_manufacturer_no_legend.png",
+            group_by="manufacturer",
+            show_legend=False,
+            success_only=True,
+            title="Span vs Load curves by manufacturer (no legend)",
+        )
+        '''
+
+        figure_paths["non_negative_carbon_dir"] = str(nn_root)
+        logger.info("[reporting] Wrote non-negative-carbon figure duplicates to %s", nn_root)
+
+    except Exception:
+        logger.exception("[reporting] failed to write non-negative-carbon duplicate figures")
 
     return ReportArtifacts(tables=tables, table_paths=table_paths, figure_paths=figure_paths)
 

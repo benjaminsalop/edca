@@ -63,6 +63,11 @@ def resolve_span_values(cf, args, logger: Optional[logging.Logger] = None) -> Li
 
     # 2) Control file spans
     cf_spans = getattr(cf, "spans", None)
+    if isinstance(cf_spans, (int, float, str)):
+        try:
+            return [float(cf_spans)]
+        except Exception:
+            pass
     if isinstance(cf_spans, (list, tuple)) and len(cf_spans) > 0:
         spans = [float(v) for v in cf_spans]
         if no_sweep:

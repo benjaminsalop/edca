@@ -19,7 +19,7 @@ def run_code_checks_if_requested(candidates_df, out_dir, run_flag, **kwargs):
         from edca_code.scripts.code_checks import code_checks  # preferred location
     except Exception:
         try:
-            import code_checks  # fallback
+            from edca_code.scripts.code_checks import code_checks  # fallback
         except Exception:
             logger.warning("[codechecks] requested but no code_checks module found; skipping.")
             return pd.DataFrame()
@@ -27,7 +27,38 @@ def run_code_checks_if_requested(candidates_df, out_dir, run_flag, **kwargs):
     # Run checks
     try:
         if hasattr(code_checks, "run_code_checks_on_candidates"):
-            results: Any = code_checks.run_code_checks_on_candidates(candidates_df)
+            # Pull known kwargs (and accept common aliases)
+            material_csv_path = (
+                kwargs.get("material_csv_path")
+                or kwargs.get("materials")
+                or kwargs.get("materials_path")
+                or kwargs.get("materials_csv")
+            )
+            load_combos_yaml = kwargs.get("load_combos_yaml")
+            load_values_yaml = kwargs.get("load_values_yaml")
+
+            # Optional debug passthrough: dump the inputs used by the checker
+            debug_inputs = bool(
+                kwargs.get("debug_inputs")
+                or kwargs.get("codechecks_debug_inputs")
+                or kwargs.get("codechecks_debug")
+            )
+            debug_only_on_fail = bool(
+                kwargs.get("debug_only_on_fail", True)
+                if "debug_only_on_fail" in kwargs
+                else kwargs.get("codechecks_debug_only_on_fail", True)
+            )
+            debug_max_rows = int(kwargs.get("debug_max_rows", kwargs.get("codechecks_debug_max_rows", 50)) or 50)
+
+            results: Any = code_checks.run_code_checks_on_candidates(
+                candidates_df,
+                material_csv_path=material_csv_path,
+                load_combos_yaml=load_combos_yaml,
+                load_values_yaml=load_values_yaml,
+                debug_inputs=debug_inputs,
+                debug_only_on_fail=debug_only_on_fail,
+                debug_max_rows=debug_max_rows,
+            )
         elif hasattr(code_checks, "run"):
             results = code_checks.run(candidates_df)
         else:
