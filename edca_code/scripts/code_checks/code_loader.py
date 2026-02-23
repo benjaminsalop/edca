@@ -47,7 +47,15 @@ def _read_material_table(path: str) -> pd.DataFrame:
 
     suf = p.suffix.lower()
     if suf == ".csv":
-        df = pd.read_csv(path, dtype=str).fillna("")
+        if str(path).lower().endswith((".parquet", ".pq")):
+            df = pd.read_parquet(path)
+            # make deterministic like CSV path
+            df = df.copy()
+            for c in df.columns:
+                df[c] = df[c].astype(str)
+            df = df.fillna("")
+        else:
+            df = pd.read_csv(path, dtype=str).fillna("")
     elif suf in (".parquet", ".pq"):
         df = pd.read_parquet(path)
         # normalize to strings to match existing behavior

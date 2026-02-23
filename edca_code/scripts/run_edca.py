@@ -335,6 +335,155 @@ def main(argv: Optional[List[str]] = None) -> None:
     except Exception:
         logger.exception("[takeoff] Failed global expanded materials write")
 
+        # -------------------------
+        # Build GLOBAL summary outputs:
+        #   - summary_ranked_all_long.csv : what EDCA previously wrote to summary_ranked_all.csv
+        #       (collapsed/aggregated across cases over the *intersection* of systems)
+        #   - summary_ranked_all.csv      : NEW wide inner-join merge across case subfolders
+        #       (exactly one row per system_variant)
+        # -------------------------
+        ranked_union = pd.concat(all_ranked_all, ignore_index=True, sort=False) if all_ranked_all else pd.DataFrame()
+
+        if not ranked_union.empty:
+            if "system_variant" not in ranked_union.columns:
+                raise ValueError(
+                    "Cannot build global summary: no system identifier column found "
+                    "(expected system_variant)."
+                )
+
+            # --- normalize join key to avoid whitespace mismatches
+            def _norm_variant(s):
+                return str(s).strip()
+
+            # Compute intersection of system_variants present in EVERY case
+            common_variants = None
+            for df_case in all_ranked_all:
+                if df_case is None or df_case.empty or "system_variant" not in df_case.columns:
+                    continue
+                keys = df_case[["system_variant"]].copy()
+                keys["system_variant"] = keys["system_variant"].map(_norm_variant)
+                keys = keys.drop_duplicates()
+                common_variants = keys if common_variants is None else common_variants.merge(
+                    keys, on=["system_variant"], how="inner"
+                )
+
+            if common_variants is None or common_variants.empty:
+                # nothing common across cases — write empty files so downstream doesn't crash mysteriously
+                pd.DataFrame().to_csv(Path(out_dir) / "summary_ranked_all_long.csv", index=False)
+                pd.DataFrame().to_csv(Path(out_dir) / "summary_ranked_all.csv", index=False)
+            else:
+                # Filter the union to only common systems
+                ranked_common = ranked_union.copy()
+                ranked_common["system_variant"] = ranked_common["system_variant"].map(_norm_variant)
+                ranked_common = ranked_common.merge(common_variants, on=["system_variant"], how="inner")
+
+                # -------------------------
+                # (A) Long file = what you USED to write to summary_ranked_all.csv
+                #     i.e., collapsed across cases using groupby+aggregation.
+                # -------------------------
+                join_cols = []
+                if all(c in ranked_common.columns for c in ["system_family", "system_variant"]):
+                    join_cols = ["system_family", "system_variant"]
+                else:
+                    join_cols = ["system_variant"]
+
+                def _agg_rule(col: str) -> str:
+                    # worst-case across cases for sizing/constraints-ish metrics:
+                    if any(s in col for s in ["depth", "util", "unity", "dcr", "demand", "mass", "carbon", "cost"]):
+                        return "max"
+                    return "first"
+
+                agg = {}
+                for c in ranked_common.columns:
+                    if c in join_cols:
+                        continue
+                    if pd.api.types.is_numeric_dtype(ranked_common[c]):
+                        agg[c] = _agg_rule(c)
+                    else:
+                        agg[c] = "first"
+
+                summary_ranked_all_old_behavior = (
+                    ranked_common
+                    .groupby(join_cols, dropna=False, as_index=False)
+                    .agg(agg)
+                )
+
+                # <-- this is what summary_ranked_all.csv USED to be
+                summary_ranked_all_old_behavior.to_csv(
+                    Path(out_dir) / "summary_ranked_all_long.csv",
+                    index=False
+                )
+
+                # -------------------------
+                # (B) Condensed file = TRUE inner-join MERGE across case tables
+                #     One row per system_variant; columns suffixed by case name.
+                # -------------------------
+                import re as _re
+
+                def _safe_suffix(x: str) -> str:
+                    x = _re.sub(r"[^A-Za-z0-9]+", "_", str(x)).strip("_")
+                    return x or "case"
+
+                def _best_per_variant(df: pd.DataFrame) -> pd.DataFrame:
+                    """Ensure at most one row per system_variant within a case."""
+                    D = df.copy()
+                    D["system_variant"] = D["system_variant"].map(_norm_variant)
+
+                    # Prefer best by rank columns if available
+                    sort_cols = [c for c in ["rank_overall", "rank_carbon", "rank", "carbon_total_kgCO2", "cost_total"] if c in D.columns]
+                    if sort_cols:
+                        D = D.sort_values(by=sort_cols, ascending=True, kind="mergesort")
+
+                    return D.drop_duplicates(subset=["system_variant"], keep="first")
+
+                wide_tables = []
+                for i, df_case in enumerate(all_ranked_all):
+                    if df_case is None or df_case.empty or "system_variant" not in df_case.columns:
+                        continue
+
+                    # pick a readable suffix for this case
+                    if "case" in df_case.columns and df_case["case"].notna().any():
+                        case_name = str(df_case["case"].dropna().iloc[0])
+                    elif "occupancy" in df_case.columns and df_case["occupancy"].notna().any():
+                        case_name = str(df_case["occupancy"].dropna().iloc[0])
+                    else:
+                        case_name = f"case_{i+1}"
+
+                    suffix = _safe_suffix(case_name)
+
+                    D = _best_per_variant(df_case)
+                    D = D.merge(common_variants, on=["system_variant"], how="inner")
+
+                    # Keep system_family once (unsuffixed) if present; drop it from subsequent cases
+                    if i > 0 and "system_family" in D.columns:
+                        D = D.drop(columns=["system_family"])
+
+                    # Rename all non-key columns with suffix to avoid collisions
+                    ren = {}
+                    for c in D.columns:
+                        if c == "system_variant":
+                            continue
+                        ren[c] = f"{c}__{suffix}"
+                    D = D.rename(columns=ren)
+
+                    wide_tables.append(D)
+
+                if not wide_tables:
+                    pd.DataFrame().to_csv(Path(out_dir) / "summary_ranked_all.csv", index=False)
+                else:
+                    merged = wide_tables[0]
+                    for t in wide_tables[1:]:
+                        merged = merged.merge(t, on=["system_variant"], how="inner")
+
+                    # Guarantee uniqueness: one row per system_variant
+                    if merged["system_variant"].duplicated().any():
+                        raise ValueError(
+                            "Condensed summary merge produced duplicate system_variant rows. "
+                            "Check your per-case inputs."
+                        )
+
+                    merged.to_csv(Path(out_dir) / "summary_ranked_all.csv", index=False)
+
     # -------------------------
     # Code checks (winners only)
     # -------------------------
@@ -357,19 +506,22 @@ def main(argv: Optional[List[str]] = None) -> None:
         logger.exception("[codechecks] unexpected failure in codechecks block")
 
     # -------------------------
-    # Reporting
+    # Reporting (global)
     # -------------------------
     try:
-        reporting_mod.write_edca_reports_from_summary(
-            out_dir=out_dir,
-            floor_assignments=dict(getattr(cf, "program", {}) or {}),
-            floor_area_lookup=floor_area_lookup,
-            verbose=bool(args.verbose),
-            metric="carbon_per_m2",
-        )
-        logger.info("[reporting] Wrote reports -> %s", out_dir / "reporting")
+        ranked_union = pd.concat(all_ranked_all, ignore_index=True, sort=False) if all_ranked_all else pd.DataFrame()
+        if ranked_union is None or ranked_union.empty:
+            logger.warning('[reporting] No ranked results to report; skipping.')
+        else:
+            reporting_mod.write_edca_reports(
+                candidates_input=ranked_union,
+                summary_df=ranked_union,
+                out_dir=out_dir,
+                metric='carbon_per_m2',
+            )
+            logger.info('[reporting] Wrote reports -> %s', Path(out_dir) / 'reporting')
     except Exception:
-        logger.exception("[reporting] Failed to write reports")
+        logger.exception('[reporting] Failed to write reports')
 
     logger.info("[run_edca] Done.")
 

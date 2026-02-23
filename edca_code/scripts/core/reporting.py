@@ -9,8 +9,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 import matplotlib
-import matplotlib.pyplot as plt
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+
+from pathlib import Path
+import glob
 
 
 # Prefer canonical helpers when available, but keep fallbacks so reporting.py
@@ -95,24 +99,30 @@ def _ensure_success_mask(df):
 
 def load_summary_ranked_all(out_dir: str | Path) -> pd.DataFrame:
     """
-    Load the canonical 'summary_ranked_all.csv' from the run output directory.
-    Tries root first, then falls back to searching case folders.
+    Prefer summary_ranked_all_long.csv (long-form) for reporting.
+    Fall back to summary_ranked_all.csv (wide) if needed.
     """
     out_dir = Path(out_dir)
 
-    # Most common location (root)
-    p0 = out_dir / "summary_ranked_all.csv"
-    if p0.exists():
-        return pd.read_csv(p0)
+    p_long = out_dir / "summary_ranked_all_long.csv"
+    if p_long.exists():
+        return pd.read_csv(p_long)
 
-    # Fallback: search in immediate subfolders (systems_* etc.)
-    for p in out_dir.rglob("summary_ranked_all.csv"):
-        try:
-            return pd.read_csv(p)
-        except Exception:
-            continue
+    p_wide = out_dir / "summary_ranked_all.csv"
+    if p_wide.exists():
+        return pd.read_csv(p_wide)
 
-    raise FileNotFoundError(f"Could not find summary_ranked_all.csv under {out_dir}")
+    # fallback search
+    for fname in ["summary_ranked_all_long.csv", "summary_ranked_all.csv"]:
+        for p in out_dir.rglob(fname):
+            try:
+                return pd.read_csv(p)
+            except Exception:
+                continue
+
+    raise FileNotFoundError(
+        f"Could not find summary_ranked_all_long.csv or summary_ranked_all.csv under {out_dir}"
+    )
 
 def _group_by_system_variant(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -152,280 +162,6 @@ def _group_by_system_variant(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     return grouped
-
-def write_edca_reports_from_summary(
-    *,
-    out_dir: str | Path,
-    floor_assignments: dict[int, str] | None = None,
-    floor_area_lookup: dict[int, float] | None = None,
-    verbose: bool = False,
-    metric: str = "carbon_per_m2") -> ReportArtifacts:
-    """
-    Same as write_edca_reports, but uses summary_ranked_all.csv files found under `out_dir`
-    as the canonical input. This function will:
-
-      1. Search recursively under `out_dir` for all files named "summary_ranked_all.csv".
-      2. Create a union (outer) table -> total_summary_all.csv (concat + drop exact duplicates).
-      3. Create an intersection (inner) table -> compatible_summary_all.csv
-         (keeps system_variant values present in every found file).
-      4. Write both tables under: <out_dir>/reporting/tables/
-      5. Use the union table as the canonical `candidates_input` to call write_edca_reports(...)
-
-    Returns the same ReportArtifacts/datatype as write_edca_reports.
-    """
-    log = logging.getLogger(__name__)
-    out_dir = Path(out_dir)
-    out_dir_resolved = out_dir.resolve()
-    logging.debug("[reporting] combining summary_ranked_all files under %s", out_dir_resolved)
-
-    # find all summary_ranked_all.csv under the given out_dir
-    found = list(out_dir.rglob("summary_ranked_all.csv"))
-
-    if not found:
-        # existing behavior: load_summary_ranked_all would raise; keep similar behavior but clearer message
-        raise FileNotFoundError(f"No summary_ranked_all.csv files found under {out_dir_resolved}")
-
-    # read and tag each found file
-    dfs = []
-    for p in found:
-        try:
-            d = pd.read_csv(p, low_memory=False)
-        except Exception as e:
-            log.warning("[reporting] failed to read %s: %s", p, e)
-            continue
-        # normalize column names (strip whitespace)
-        d.columns = [c.strip() for c in d.columns]
-        d["_source_path"] = str(p)
-        d["_source_dir"] = str(p.parent.name)
-        dfs.append(d)
-
-    if not dfs:
-        raise ValueError(f"Found summary files at {len(found)}, but none were readable.")
-
-    # Prepare output folders: <out_dir>/reporting/tables and figures
-    reporting_root = out_dir / "reporting"
-    tables_dir = reporting_root / "tables"
-    figures_dir = reporting_root / "figures"
-    tables_dir.mkdir(parents=True, exist_ok=True)
-    figures_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1) total (outer) union: concat and drop exact duplicates
-        # ---------------------------
-    # Build union and intersection
-    # ---------------------------
-
-    # create raw union first (keep provenance columns)
-    total_df_raw = pd.concat(dfs, ignore_index=True, sort=False)
-    total_df_raw = total_df_raw.drop_duplicates()
-
-    log.info("[reporting] Combined raw union rows (before grouping): %d", len(total_df_raw))
-
-        # --- JOIN canonical typology/type from inputs/canonical/system_families ---
-    try:
-        sf_path_parquet = Path("inputs") / "canonical" / "system_families.parquet"
-        sf_path_csv = Path("inputs") / "canonical" / "system_families.csv"
-        system_families_df = None
-
-        if sf_path_parquet.exists():
-            try:
-                system_families_df = pd.read_parquet(sf_path_parquet)
-                log.info("[reporting] Loaded canonical system_families from %s", sf_path_parquet)
-            except Exception as e_parq:
-                log.warning("[reporting] Failed to read parquet %s: %s (will try CSV)", sf_path_parquet, e_parq)
-
-        if system_families_df is None and sf_path_csv.exists():
-            try:
-                system_families_df = pd.read_csv(sf_path_csv)
-                log.info("[reporting] Loaded canonical system_families from %s", sf_path_csv)
-            except Exception as e_csv:
-                log.warning("[reporting] Failed to read CSV %s: %s", sf_path_csv, e_csv)
-
-        if system_families_df is not None:
-            # normalize columns lower-case and strip whitespace
-            system_families_df.columns = [c.strip() for c in system_families_df.columns]
-            # For safety, canonical file may call the category column something else; check common names
-            # We expect canonical to have a column called 'system_family' and one called 'category' (typology) and/or 'type'
-            cols_lower = {c.lower(): c for c in system_families_df.columns}
-            # find canonical columns
-            sysfam_col = None
-            if "system_family" in cols_lower:
-                sysfam_col = cols_lower["system_family"]
-            else:
-                # try alternatives
-                for alt in ("family", "systemfamily", "system-family"):
-                    if alt in cols_lower:
-                        sysfam_col = cols_lower[alt]
-                        break
-
-            cat_col = None
-            if "category" in cols_lower:
-                cat_col = cols_lower["category"]
-            elif "typology" in cols_lower:
-                cat_col = cols_lower["typology"]
-
-            type_col = None
-            if "type" in cols_lower:
-                type_col = cols_lower["type"]
-
-            if sysfam_col is None:
-                log.warning("[reporting] canonical system_families found but no 'system_family' column; skipping join.")
-            else:
-                # Prepare for join: standardize join key names to 'system_family'
-                sfdf = system_families_df.copy()
-                sfdf = sfdf.rename(columns={sysfam_col: "system_family"})
-                # pick typology and type columns if present and rename them
-                if cat_col:
-                    sfdf = sfdf.rename(columns={cat_col: "typology"})
-                if type_col:
-                    sfdf = sfdf.rename(columns={type_col: "type"})
-
-                # coerce system_family in both frames to str and strip for robust matches
-                total_df_raw["system_family"] = total_df_raw.get("system_family", "").astype(str).str.strip()
-                sfdf["system_family"] = sfdf["system_family"].astype(str).str.strip()
-
-                # perform left join; do not overwrite existing typology/type if present in total_df_raw
-                merged = total_df_raw.merge(sfdf[["system_family"] + [c for c in ("typology", "type") if c in sfdf.columns]],
-                                            on="system_family", how="left", suffixes=("", "_canon"))
-
-                # if main DF is missing typology/type, fill from canonical; otherwise keep existing
-                if "typology" not in merged.columns or merged["typology"].isnull().all():
-                    if "typology_canon" in merged.columns:
-                        merged["typology"] = merged["typology_canon"]
-                else:
-                    # fill only missing values
-                    if "typology_canon" in merged.columns:
-                        merged["typology"] = merged["typology"].fillna(merged.get("typology_canon"))
-
-                if "type" not in merged.columns or merged["type"].isnull().all():
-                    if "type_canon" in merged.columns:
-                        merged["type"] = merged["type_canon"]
-                else:
-                    if "type_canon" in merged.columns:
-                        merged["type"] = merged["type"].fillna(merged.get("type_canon"))
-
-                # drop the *_canon helper cols
-                for col in ("typology_canon", "type_canon"):
-                    if col in merged.columns:
-                        merged = merged.drop(columns=[col])
-
-                total_df_raw = merged
-                log.info("[reporting] Joined canonical system_families (typology/type) onto combined summary (matches=%d/%d)",
-                         total_df_raw["typology"].notna().sum(), len(total_df_raw))
-        else:
-            log.info("[reporting] No canonical system_families file found at inputs/canonical; typology/type will be inferred or left as-is.")
-    except Exception:
-        log.exception("[reporting] Unexpected failure while attempting to join canonical system_families; continuing without join.")
-
-    # Determine key for compatibility (same logic as before)
-    key_col = None
-    preferred_key = "system_variant"
-    if preferred_key in total_df_raw.columns:
-        key_col = [preferred_key]
-    else:
-        common_cols = set(dfs[0].columns)
-        for d in dfs[1:]:
-            common_cols &= set(d.columns)
-        common_cols = [c for c in common_cols if not c.startswith("_source")]
-        for alt in ("system", "variant", "system_variant_id"):
-            if alt in common_cols:
-                key_col = [alt]
-                break
-        if key_col is None:
-            if common_cols:
-                key_col = sorted(common_cols)
-            else:
-                log.warning("[reporting] No sensible key found for intersection; compatible == total (fallback).")
-                # group total now and write both as identical grouped tables
-                total_df_grouped = _group_by_system_variant(total_df_raw)
-                total_fp = tables_dir / "total_summary_all.csv"
-                total_df_grouped.to_csv(total_fp, index=False)
-                log.info("[reporting] Wrote combined (outer union, grouped) -> %s (rows=%d)", total_fp, len(total_df_grouped))
-
-                compat_df_grouped = total_df_grouped.copy()
-                compat_fp = tables_dir / "compatible_summary_all.csv"
-                compat_df_grouped.to_csv(compat_fp, index=False)
-                log.info("[reporting] Wrote compatible (fallback == total, grouped) -> %s (rows=%d)", compat_fp, len(compat_df_grouped))
-
-                # write canonical and call downstream writer using grouped total
-                canonical_fp = reporting_root / "summary_ranked_all.csv"
-                total_df_grouped.to_csv(canonical_fp, index=False)
-                return write_edca_reports(
-                    candidates_input=total_df_grouped,
-                    out_dir=reporting_root,
-                    floor_assignments=floor_assignments,
-                    floor_area_lookup=floor_area_lookup,
-                    verbose=verbose,
-                    metric=metric,
-                )
-
-    # --- NORMALISE: treat carbon_total_kgCO2 as carbon_per_m2 if needed ---
-    # (Your CSV labels this as total but it is actually already per m².)
-    if "carbon_per_m2" not in total_df_raw.columns and "carbon_total_kgCO2" in total_df_raw.columns:
-        try:
-            total_df_raw["carbon_per_m2"] = pd.to_numeric(total_df_raw["carbon_total_kgCO2"], errors="coerce")
-            log.info("[reporting] Note: created column 'carbon_per_m2' from 'carbon_total_kgCO2' (assumed per m²).")
-        except Exception:
-            log.exception("[reporting] Failed to coerce carbon_total_kgCO2 -> carbon_per_m2; proceeding without conversion.")
-
-
-    # At this point key_col is set (single or composite). Compute compatible intersection using the RAW union
-    if isinstance(key_col, (list, tuple)) and len(key_col) == 1:
-        key_col_single = key_col[0]
-    else:
-        key_col_single = key_col
-
-    # Compute compatible intersection
-    if isinstance(key_col_single, str):
-        counts = total_df_raw.groupby(key_col_single)["_source_dir"].nunique().reset_index().rename(columns={"_source_dir": "n_files"})
-        n_files = len(dfs)
-        present_in_all = counts[counts["n_files"] == n_files][key_col_single].tolist()
-        compat_df_raw = total_df_raw[total_df_raw[key_col_single].isin(present_in_all)].copy()
-    else:
-        # composite key list
-        tuple_sets = []
-        for d in dfs:
-            subset = d.dropna(subset=key_col)
-            tuples = set(tuple(row[c] for c in key_col) for _, row in subset.iterrows())
-            tuple_sets.append(tuples)
-        common_tuples = set.intersection(*tuple_sets) if tuple_sets else set()
-        if not common_tuples:
-            compat_df_raw = total_df_raw.iloc[0:0].copy()
-        else:
-            def in_common(row):
-                return tuple(row[c] for c in key_col) in common_tuples
-            compat_df_raw = total_df_raw[total_df_raw.apply(in_common, axis=1)].copy()
-
-    # Now group both raw tables by system_variant (collapse to one row per variant)
-    total_df = _group_by_system_variant(total_df_raw)
-    compat_df = _group_by_system_variant(compat_df_raw)
-
-    # Write grouped outputs
-    total_fp = tables_dir / "total_summary_all.csv"
-    total_df.to_csv(total_fp, index=False)
-    log.info("[reporting] Wrote combined (outer union, grouped) total_summary_all -> %s (rows=%d)", total_fp, len(total_df))
-
-    compat_fp = tables_dir / "compatible_summary_all.csv"
-    compat_df.to_csv(compat_fp, index=False)
-    log.info("[reporting] Wrote compatible (inner intersection, grouped) compatible_summary_all -> %s (rows=%d)", compat_fp, len(compat_df))
-
-    # (Optional) also write a "canonical" summary_ranked_all.csv under the reporting root
-    canonical_fp = reporting_root / "summary_ranked_all.csv"
-    try:
-        # By default make the canonical file the total (outer union) so reporting uses the union
-        total_df.to_csv(canonical_fp, index=False)
-        log.info("[reporting] Wrote canonical summary_ranked_all -> %s", canonical_fp)
-    except Exception:
-        log.warning("[reporting] Could not write canonical summary_ranked_all at %s", canonical_fp)
-
-    # Finally call the original writer with the total_df as the candidates input
-    return write_edca_reports(
-        candidates_input=total_df,
-        out_dir=reporting_root,
-        floor_assignments=floor_assignments,
-        floor_area_lookup=floor_area_lookup,
-        verbose=verbose,
-        metric=metric,
-    )
 
 def to_numeric_safe(series: Any) -> pd.Series:
     """Convert a Series-like to numeric, coercing errors to NaN."""
@@ -511,13 +247,8 @@ def concat_candidates_input(candidates: Any) -> pd.DataFrame:
 
 def compute_pareto_frontier(df: pd.DataFrame,
                             x_col: str,
-                            y_col: str,
-                            minimize_y: bool = True) -> pd.DataFrame:
-    """
-    Compute 2D Pareto frontier.
-    Assumes larger x is 'more' (e.g. span),
-    and lower y is better (e.g. carbon).
-    """
+                            y_col: str) -> pd.DataFrame:
+
     df = df[[x_col, y_col]].dropna().sort_values(x_col)
 
     frontier = []
@@ -525,7 +256,7 @@ def compute_pareto_frontier(df: pd.DataFrame,
 
     for _, row in df.iterrows():
         y = row[y_col]
-        if y < best_y:
+        if y <= best_y:
             frontier.append(row)
             best_y = y
 
@@ -1015,7 +746,8 @@ def plot_span_vs_carbon_by_type(df: pd.DataFrame, out_fp: Path, *, label_prefix=
         df = df[mask.fillna(False)]
     df = df.dropna(subset=["_carbon", "_span"])
     if df.empty:
-        return None
+        print("[INFO] No passing rows — plotting all candidates instead.")
+        df = df.copy()
 
     color_by = "type" if "type" in df.columns else "system_family" if "system_family" in df.columns else None
     if color_by is None:
@@ -1244,8 +976,8 @@ def plot_span_vs_carbon_pareto(df_all: pd.DataFrame,
                                fig_dir: Path,
                                carbon_col: str = "carbon_per_m2") -> Dict[str, Path]:
 
-    span_col = "span" if "span" in df_all.columns else (
-        "max_span" if "max_span" in df_all.columns else None
+    span_col = "max_span" if "max_span" in df_all.columns else (
+        "span" if "span" in df_all.columns else None
     )
 
     if span_col is None or carbon_col not in df_all.columns:
@@ -1333,7 +1065,7 @@ def plot_depth_vs_carbon(df_all: pd.DataFrame,
     df = df_all.copy()
     df["total_depth"] = df[depth_cols].sum(axis=1)
 
-    span_col = "span" if "span" in df.columns else "max_span"
+    span_col = "max_span" if "max_span" in df.columns else "span"
 
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.scatter(df["total_depth"], df[carbon_col], alpha=0.3)
@@ -1369,28 +1101,42 @@ def plot_carbon_distribution_by_type(df_all: pd.DataFrame,
     return {"carbon_distribution_by_type": out_path}
 
 def plot_feasibility_heatmap(df_all: pd.DataFrame,
-                             fig_dir: Path,
-                             carbon_col: str = "carbon_per_m2") -> Dict[str, Path]:
+                             fig_dir: Path) -> Dict[str, Path]:
 
     if "pass_overall" not in df_all.columns:
         return {}
 
-    span_col = "span" if "span" in df_all.columns else "max_span"
+    span_col = "max_span" if "max_span" in df_all.columns else "span"
 
     df = df_all.copy()
-    df["span_bin"] = pd.cut(df[span_col], bins=8)
-    df["load_bin"] = pd.cut(df["sdl"] + df["ll"], bins=8)
+    df["total_load"] = df["sdl"] + df["ll"]
+
+    df["span_bin"] = pd.cut(df[span_col], bins=6)
+    df["load_bin"] = pd.cut(df["total_load"], bins=6)
 
     pivot = df.pivot_table(index="span_bin",
                            columns="load_bin",
                            values="pass_overall",
                            aggfunc="mean")
 
+    if pivot.empty:
+        print("[INFO] Feasibility heatmap has no data.")
+        return {}
+
     fig, ax = plt.subplots(figsize=(8, 6))
+
     im = ax.imshow(pivot.values, aspect="auto")
 
-    ax.set_title("Pass rate heatmap")
-    fig.colorbar(im)
+    ax.set_xticks(range(len(pivot.columns)))
+    ax.set_xticklabels([str(c) for c in pivot.columns], rotation=45)
+
+    ax.set_yticks(range(len(pivot.index)))
+    ax.set_yticklabels([str(i) for i in pivot.index])
+
+    ax.set_xlabel("Total load bin")
+    ax.set_ylabel("Max span bin")
+
+    fig.colorbar(im, ax=ax, label="Pass rate")
 
     out_path = fig_dir / "feasibility_heatmap.png"
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
@@ -1972,6 +1718,65 @@ def plot_span_vs_load_curves_by_family_highlight(
     plt.close(fig)
     return str(out_fp)
 
+def scatter_successful_span_vs_carbon_by_type(
+    df_all: pd.DataFrame,
+    fig_dir: Path,
+    carbon_col: str = "carbon_per_m2"
+) -> Dict[str, Path]:
+    """
+    Scatter of max_span vs carbon for passing variants,
+    color-coded by type.
+    """
+
+    # Ensure required columns exist
+    if carbon_col not in df_all.columns:
+        return {}
+
+    span_col = "max_span" if "max_span" in df_all.columns else (
+        "span" if "span" in df_all.columns else None
+    )
+
+    if span_col is None:
+        return {}
+
+    if "type" not in df_all.columns:
+        return {}
+
+    # Filter to passing if available
+    if "pass_overall" in df_all.columns:
+        df = df_all[df_all["pass_overall"] == True].copy()
+        if df.empty:
+            print("[INFO] No passing rows found — plotting all instead.")
+            df = df_all.copy()
+    else:
+        df = df_all.copy()
+
+    if df.empty:
+        print("[INFO] No passing rows — plotting all candidates instead.")
+        df = df_all.copy()
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Plot one scatter per type
+    for t, sub in df.groupby("type"):
+        ax.scatter(
+            sub[span_col],
+            sub[carbon_col],
+            alpha=0.7,
+            label=str(t)
+        )
+
+    ax.set_xlabel("Max span (m)")
+    ax.set_ylabel("Carbon (kgCO₂/m²)")
+    ax.set_title("Successful variants: Max span vs Carbon by Type")
+
+    ax.legend(title="Type", fontsize=8)
+
+    out_path = fig_dir / "scatter_successful_span_vs_carbon_by_type.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return {"scatter_successful_span_vs_carbon_by_type": out_path}
 
 def plot_span_vs_load_curves_by_family(
     df: pd.DataFrame,
@@ -2123,8 +1928,6 @@ def plot_lowest_per_group_aggregate(
 
     return out
 
-
-
 def plot_lowest_family_variants(df: pd.DataFrame, out_dir: Path) -> Dict[str, str]:
     """Backwards-compatible wrapper used by older report pipelines.
 
@@ -2169,6 +1972,7 @@ def plot_lowest_family_variants(df: pd.DataFrame, out_dir: Path) -> Dict[str, st
 def write_edca_reports(
     candidates_input: Any,
     *,
+    summary_df: pd.DataFrame,
     out_dir: Union[str, Path],
     floor_assignments: Optional[Dict[int, str]] = None,
     floor_area_lookup: Optional[Dict[int, float]] = None,
@@ -2192,8 +1996,76 @@ def write_edca_reports(
       - code_checks_all table (priority #11, all)
     """
 
+    df_all = candidates_input.copy()
 
-    df_all = concat_candidates_input(candidates_input)
+    if "system_variant" not in df_all.columns:
+        raise ValueError("system_variant column required.")
+
+    # -------------------------------------------------
+    # Handle summary_df being either dict or DataFrame
+    # -------------------------------------------------
+
+    if isinstance(summary_df, dict):
+        # Accept a few common keys used elsewhere in the pipeline.
+        for k in ("summary_ranked_all", "ranked_all", "ranked_union", "ranked"):
+            v = summary_df.get(k)
+            if isinstance(v, pd.DataFrame):
+                summary_ranked = v
+                break
+        else:
+            raise ValueError(
+                "summary_df is a dict but does not contain a ranked DataFrame under "
+                "one of: summary_ranked_all, ranked_all, ranked_union, ranked."
+             )
+
+    elif isinstance(summary_df, pd.DataFrame):
+
+        summary_ranked = summary_df
+
+    else:
+        raise TypeError(
+            f"summary_df must be DataFrame or dict, "
+            f"got {type(summary_df)}"
+        )
+    
+    # --- Determine ID column automatically ---
+
+    possible_id_cols = [
+        "system_variant",
+        "variant",
+        "variant_id",
+        "system_variant_id",
+        "id"
+    ]
+
+    summary_id_col = next(
+        (c for c in possible_id_cols if c in summary_ranked.columns),
+        None
+    )
+
+    catalogue_id_col = next(
+        (c for c in possible_id_cols if c in candidates_input.columns),
+        None
+    )
+
+    if summary_id_col is None or catalogue_id_col is None:
+        raise ValueError(
+            f"Could not find matching variant ID column.\n"
+            f"Summary columns: {summary_ranked.columns.tolist()}\n"
+            f"Catalogue columns: {candidates_input.columns.tolist()}"
+        )
+
+    df_all = candidates_input.copy()
+
+    passing_variants = set(summary_ranked[summary_id_col].unique())
+
+    df_all["pass_overall"] = df_all[catalogue_id_col].isin(passing_variants)
+
+    print(
+        f"[INFO] Passing variants: "
+        f"{df_all['pass_overall'].sum()} "
+        f"out of {len(df_all)}"
+    )
 
     if "carbon_per_m2" not in df_all.columns and "carbon_total_kgCO2" in df_all.columns:
         try:
@@ -2207,11 +2079,14 @@ def write_edca_reports(
     df_all = standardize_schema(df_all)
     df_all = _join_system_families_metadata(df_all)
 
-    # overwrite/regenerate summary_ranked_all.csv right before reporting outputs
+    # IMPORTANT:
+    # run_edca.py now owns outputs/summary_ranked_all.csv (CONDENSED wide merge).
+    # Do NOT overwrite it here. If you want an enriched long-form file for reporting,
+    # write it to summary_ranked_all_long.csv instead.
     try:
-        write_enriched_summary_ranked_all(df_all, out_dir, filename="summary_ranked_all.csv")
+        write_enriched_summary_ranked_all(df_all, out_dir, filename="summary_ranked_all_long.csv")
     except Exception:
-        logger.exception("[reporting] failed to overwrite enriched summary_ranked_all.csv")
+        logger.exception("[reporting] failed to write enriched summary_ranked_all_long.csv")
 
     # --- Ensure manufacturer and total_load are present for plots ---
     # manufacturer will be filled by _join_system_families_metadata above if available.
@@ -2264,12 +2139,26 @@ def write_edca_reports(
         selected_variants |= set(tables["best_per_typology"]["system_variant"].dropna().astype(str).tolist())
 
     # df_all is your ranked/enriched summary dataframe
-    df_winners = (
-        df_all.sort_values("carbon_total_kgCO2")
-            .groupby(["floor_load_category"], as_index=False)
-            .head(1)
-            .copy()
-            )
+    sort_col = "carbon_total_kgCO2" if "carbon_total_kgCO2" in df_all.columns else metric
+    if sort_col not in df_all.columns:
+        df_all = _ensure_carbon(df_all)
+        sort_col = "carbon_per_m2"
+
+    group_col = None
+    if "floor_load_category" in df_all.columns:
+        group_col = "floor_load_category"
+    elif "case" in df_all.columns:
+        group_col = "case"
+
+    if group_col is None:
+        df_winners = df_all.sort_values(sort_col).head(1).copy()
+    else:
+        df_winners = (
+            df_all.sort_values(sort_col)
+                .groupby([group_col], as_index=False, dropna=False)
+                .head(1)
+                .copy()
+        )
 
     # --------------------------
     # Optional: run code checks for winners and merge safely
@@ -2316,7 +2205,6 @@ def write_edca_reports(
     except Exception:
         logger.exception("[reporting] failed running code checks for winners")
 
-
     # code checks
     code_all = table_code_checks(df_all)
     if verbose:
@@ -2327,8 +2215,6 @@ def write_edca_reports(
     else:
         tables["code_checks_selected"] = pd.DataFrame()
     
-    
-
     # save tables
     table_paths: Dict[str, str] = {}
     for name, tdf in tables.items():
@@ -2342,6 +2228,13 @@ def write_edca_reports(
             logger.warning("[reporting] failed to save table %s: %s", name, e)
     
     print("Reporting columns:", df_all.columns.tolist())
+    
+    # Compute pass_overall from scenario outputs
+    df_all["pass_overall"] = True
+
+    print(f"[INFO] Total passing variants: {len(df_all)} out of {len(df_all)}")
+    
+    print(df_all["pass_overall"].value_counts(dropna=False))
     
     # figures
     figure_paths: Dict[str, str] = {}

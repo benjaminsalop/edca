@@ -45,7 +45,81 @@ def _pick_first_present(r: Dict[str, Any], keys: Tuple[str, ...], default: Any =
             return r.get(k), k
     return default, None
 
+def _coerce_material_id(r: Dict[str, Any], materials_path: Optional[str]) -> None:
+    """
+    Ensure r['material_id'] is set.
+    Supports: material_id aliases; and mapping material_row -> material_id using the materials table.
+    """
+    # If already present, keep it
+    if not _is_missing(r.get("material_id")):
+        return
 
+    # 1) Try aliases that might already store an ID string
+    for k in (
+        "material_concrete_id",
+        "concrete_material_id",
+        "concrete_id",
+        "material",
+        "material_grade",
+        "concrete_grade",
+        "strength_class",
+        # common row-index style fields (sometimes they actually contain IDs)
+        "material_row",
+        "concrete_row",
+        "steel_row",
+        "mat_row",
+    ):
+        if not _is_missing(r.get(k)):
+            r["material_id"] = r.get(k)
+            break
+
+    # If we got something non-empty, stop here
+    if not _is_missing(r.get("material_id")):
+        return
+
+    # 2) If we only have a numeric row index, map it to material_id using the materials table
+    if not materials_path:
+        return
+
+    # find a row-index key
+    row_key = None
+    for k in ("material_row", "concrete_row", "steel_row", "mat_row"):
+        if not _is_missing(r.get(k)):
+            row_key = k
+            break
+    if row_key is None:
+        return
+
+    # parse int
+    try:
+        s = str(r.get(row_key)).strip()
+        if s.endswith(".0"):
+            s = s[:-2]
+        idx = int(s)
+    except Exception:
+        return
+
+    try:
+        # support CSV or Parquet for the lookup table
+        if str(materials_path).lower().endswith((".parquet", ".pq")):
+            dfm = pd.read_parquet(materials_path)
+        else:
+            dfm = pd.read_csv(materials_path, dtype=str)
+    except Exception:
+        return
+
+    # normalize column name
+    cols_low = {c.lower(): c for c in dfm.columns}
+    mid_col = cols_low.get("material_id")
+    if not mid_col:
+        return
+
+    # try 0-based then 1-based indexing
+    if 0 <= idx < len(dfm):
+        r["material_id"] = str(dfm.iloc[idx][mid_col])
+    elif 1 <= idx <= len(dfm):
+        r["material_id"] = str(dfm.iloc[idx - 1][mid_col])
+        
 def _material_debug(material_csv_path: Optional[str], material_id: Any) -> Dict[str, Any]:
     out: Dict[str, Any] = {"material_id": material_id}
     if not material_csv_path or _is_missing(material_id):
