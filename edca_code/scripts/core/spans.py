@@ -2,6 +2,7 @@ import pandas as pd
 from typing import Dict, List, Optional, Tuple
 import logging
 from pathlib import Path
+import json
 
 from edca_code.scripts.core import systems as systems_mod
 from edca_code.scripts.core import takeoff as takeoff_mod
@@ -125,7 +126,28 @@ def compute_candidates_for_span(
             carbon_res = carbon_mod.compute_assembly_carbon_from_bom(bom_m2, materials_df, include_a4_a5=False)
             carbon_a1a3 = float(carbon_res.get("totals", {}).get("total_a1a3", 0.0))
             r = row.copy()
+
+
+            bom_m2 = takeoff_mod.bom_per_m2_from_system_row(row)
+            carbon_res = carbon_mod.compute_assembly_carbon_from_bom(bom_m2, materials_df, include_a4_a5=False)
+
+            # keep your existing “default” total (A1-A3)
+            carbon_a1a3 = float(carbon_res.get("totals", {}).get("total_a1a3", 0.0))
+            r = row.copy()
             r["carbon_total_kgCO2"] = carbon_a1a3
+
+            # NEW: breakdowns (all are per m² because bom_m2 is per m²)
+            by_cat = carbon_res.get("totals_by_category", {}) or {}
+
+            r["carbon_concrete_per_m2"] = float(by_cat.get("concrete", 0.0))
+            r["carbon_steel_per_m2"]    = float(by_cat.get("steel", 0.0))     # steel_kg + steel_m3 combined
+            r["carbon_timber_per_m2"]   = float(by_cat.get("timber", 0.0))
+            r["carbon_screed_per_m2"]   = float(by_cat.get("screed", 0.0))    # only if you use screed in BOM
+
+            # NEW: per-material-id breakdown (stored compactly)
+            by_mat = carbon_res.get("totals_by_material_id", {}) or {}
+            r["carbon_by_material_id_json"] = json.dumps(by_mat, sort_keys=True)
+
             r["_bom_keys"] = ",".join(sorted(bom_m2.keys()))
             rows.append(r)
         except Exception:
@@ -134,8 +156,21 @@ def compute_candidates_for_span(
                 idx, span_value
             )
             r = row.copy()
-            r["carbon_total_kgCO2"] = float("nan")
-            r["_bom_keys"] = ""
+            r["carbon_total_kgCO2"] = float('nan')
+
+            # NEW: breakdowns (all are per m² because bom_m2 is per m²)
+            by_cat = carbon_res.get("totals_by_category", {}) or {}
+
+            r["carbon_concrete_per_m2"] = float('nan')
+            r["carbon_steel_per_m2"]    = float('nan')     # steel_kg + steel_m3 combined
+            r["carbon_timber_per_m2"]   = float('nan')
+            r["carbon_screed_per_m2"]   = float('nan')    # only if you use screed in BOM
+
+            # NEW: per-material-id breakdown (stored compactly)
+            by_mat = carbon_res.get("totals_by_material_id", {}) or {}
+            r["carbon_by_material_id_json"] = json.dumps(by_mat, sort_keys=True)
+
+            r["_bom_keys"] = ",".join(sorted(bom_m2.keys()))
             rows.append(r)
 
     return pd.DataFrame(rows).reset_index(drop=True)

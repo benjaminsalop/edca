@@ -128,6 +128,273 @@ def select_winners_from_ranked_all(df_ranked_all: pd.DataFrame) -> pd.DataFrame:
          .copy()
     )
 
+def collapse_summary_ranked_all_by_system_variant(df_in: pd.DataFrame) -> pd.DataFrame:
+    """
+    Collapse rows so each system_variant appears exactly once.
+
+    Typical cause of duplicates: span sweep creates multiple rows with same system_variant but slightly different span.
+    We keep ONE representative row per system_variant (prefer PASSING + lowest carbon),
+    and we attach span_min/span_max/span_n for traceability.
+
+    This is intended for SUMMARY outputs (CSV tables), not for the full candidate set used for code checks.
+    """
+    if df_in is None or df_in.empty:
+        return pd.DataFrame()
+
+    d = df_in.copy()
+
+    # normalize system id column
+    if "system_variant" not in d.columns:
+        for alt in ("system_id", "system_variant_id", "variant_id", "system"):
+            if alt in d.columns:
+                d = d.rename(columns={alt: "system_variant"})
+                break
+    if "system_variant" not in d.columns:
+        raise ValueError(f"[collapse] Expected system_variant column. Columns={list(d.columns)}")
+
+    d["system_variant"] = d["system_variant"].astype(str).str.strip()
+
+    # detect a "pass" column if present
+    pass_col = None
+    preferred = [
+        "pass_overall", "pass_all", "pass", "passes", "is_passing", "overall_pass",
+        "pass_code", "pass_checks", "all_pass"
+    ]
+    for c in preferred:
+        if c in d.columns:
+            pass_col = c
+            break
+    if pass_col is None:
+        # heuristic: any column containing "pass" that looks boolean-ish
+        for c in d.columns:
+            if "pass" in c.lower():
+                vals = d[c].dropna().astype(str).str.lower().unique().tolist()
+                if set(vals).issubset({"true", "false", "1", "0", "yes", "no", "t", "f"}):
+                    pass_col = c
+                    break
+
+    def _to_bool(x):
+        if isinstance(x, bool):
+            return x
+        s = str(x).strip().lower()
+        return s in ("true", "1", "yes", "y", "t")
+
+    if pass_col is not None:
+        d[pass_col] = d[pass_col].map(_to_bool)
+
+    # Choose representative row per system_variant:
+    # sort so "best" row comes first: PASSING first, then lowest carbon, then best rank.
+    sort_cols = []
+    ascending = []
+
+    if pass_col is not None:
+        sort_cols.append(pass_col)
+        ascending.append(False)  # True first
+
+    for c in ("carbon_total_kgCO2", "rank_overall", "rank_carbon", "rank", "cost_total"):
+        if c in d.columns:
+            sort_cols.append(c)
+            ascending.append(True)
+
+    if sort_cols:
+        d = d.sort_values(by=sort_cols, ascending=ascending, kind="mergesort")
+
+    best = (
+        d.groupby("system_variant", dropna=False, as_index=False)
+         .head(1)
+         .copy()
+    )
+
+    # Span stats (keep representative span column as-is for compatibility, but also add min/max/count)
+    if "span" in d.columns:
+        span_num = pd.to_numeric(d["span"], errors="coerce")
+        span_stats = (
+            d.assign(_span=span_num)
+             .groupby("system_variant", dropna=False)["_span"]
+             .agg(span_min="min", span_max="max", span_n="count")
+             .reset_index()
+        )
+        best = best.merge(span_stats, on="system_variant", how="left")
+
+    # Guarantee 1 row per variant
+    if best["system_variant"].duplicated().any():
+        raise ValueError("[collapse] Still duplicated system_variant after collapse (unexpected).")
+
+    return best
+
+def finalize_root_summary_ranked_all(out_dir: Path, logger: logging.Logger) -> None:
+    """
+    Build root-level summaries from per-case subfolder summary_ranked_all.csv files.
+
+    Writes:
+      - <out_dir>/summary_ranked_all_long.csv : long form (case × system_variant), filtered to intersection across cases
+      - <out_dir>/summary_ranked_all.csv      : wide inner-join across cases, 1 row per system_variant
+    """
+    out_dir = Path(out_dir)
+    case_dirs = sorted([p for p in out_dir.iterdir() if p.is_dir() and p.name.startswith("systems_")])
+    if not case_dirs:
+        logger.warning("[summary] No systems_* case folders found under %s; skipping root summary build.", out_dir)
+        return
+
+    # Load per-case summaries
+    case_tables = []
+    for d in case_dirs:
+        p = d / "summary_ranked_all.csv"
+        if not p.exists():
+            continue
+        try:
+            df = pd.read_csv(p)
+        except Exception:
+            logger.exception("[summary] Failed reading %s", p)
+            continue
+
+        if "system_variant" not in df.columns:
+            logger.warning("[summary] %s missing system_variant; skipping.", p)
+            continue
+
+        case_name = d.name[len("systems_"):] or d.name
+        df = df.copy()
+        df["case"] = case_name
+        df["system_variant"] = df["system_variant"].astype(str).str.strip()
+        case_tables.append((case_name, df))
+
+    if not case_tables:
+        logger.warning("[summary] No per-case summary_ranked_all.csv files found; skipping.")
+        return
+
+    # Inner-join key set: variants present in every case
+    common = None
+    for case_name, df in case_tables:
+        keys = set(df["system_variant"].dropna().astype(str).str.strip().unique().tolist())
+        common = keys if common is None else (common & keys)
+
+    if not common:
+        logger.warning("[summary] No common system_variants across cases; writing empty root summaries.")
+        pd.DataFrame().to_csv(out_dir / "summary_ranked_all_long.csv", index=False)
+        pd.DataFrame().to_csv(out_dir / "summary_ranked_all.csv", index=False)
+        return
+
+    common = sorted(common)
+
+    # -------------------------
+    # (1) Long file: concat all cases restricted to common variants
+    # -------------------------
+    long_parts = []
+    for case_name, df in case_tables:
+        long_parts.append(df[df["system_variant"].isin(common)].copy())
+    long_df = pd.concat(long_parts, ignore_index=True, sort=False)
+    long_df.to_csv(out_dir / "summary_ranked_all_long.csv", index=False)
+
+    # -------------------------
+    # (2) Wide file: collapse duplicates within each case to 1 row/variant, then inner-join merge across cases
+    # -------------------------
+    import re as _re
+
+    def _safe_suffix(x: str) -> str:
+        x = _re.sub(r"[^A-Za-z0-9]+", "_", str(x)).strip("_")
+        return x or "case"
+
+    def _collapse_one_case(df_case: pd.DataFrame) -> pd.DataFrame:
+        """
+        Collapse multiple rows per system_variant within a case.
+        If duplicates exist because of span (or other small param changes), aggregate them.
+        """
+        D = df_case.copy()
+        D["system_variant"] = D["system_variant"].astype(str).str.strip()
+
+        # Handle span specially (if present): keep min/max, drop raw span
+        if "span" in D.columns:
+            span_num = pd.to_numeric(D["span"], errors="coerce")
+            D["_span_num"] = span_num
+            D["_span_str"] = D["span"].astype(str)
+
+        # Build aggregation rules
+        agg = {}
+        for c in D.columns:
+            if c in ("system_variant", "case"):
+                continue
+            if c in ("system_family",):
+                agg[c] = "first"
+                continue
+
+            s = c.lower()
+
+            # span handled later
+            if c in ("span", "_span_num", "_span_str"):
+                continue
+
+            if pd.api.types.is_bool_dtype(D[c]):
+                agg[c] = "all" if ("pass" in s or s.startswith("ok")) else "first"
+                continue
+
+            if pd.api.types.is_numeric_dtype(D[c]):
+                if "rank" in s:
+                    agg[c] = "min"  # best
+                elif any(k in s for k in ("carbon", "co2", "kgco2", "cost", "price", "usd", "gbp")):
+                    agg[c] = "min"  # best
+                elif any(k in s for k in ("depth", "util", "unity", "dcr", "demand")):
+                    agg[c] = "max"  # worst-case
+                else:
+                    agg[c] = "first"
+            else:
+                agg[c] = "first"
+
+        collapsed = D.groupby("system_variant", dropna=False, as_index=False).agg(agg)
+
+        # add span_min/span_max if span existed
+        if "_span_num" in D.columns:
+            span_stats = (
+                D.groupby("system_variant", dropna=False)["_span_num"]
+                .agg(span_min="min", span_max="max")
+                .reset_index()
+            )
+            collapsed = collapsed.merge(span_stats, on="system_variant", how="left")
+        elif "_span_str" in D.columns:
+            span_stats = (
+                D.groupby("system_variant", dropna=False)["_span_str"]
+                .agg(span_min="min", span_max="max")
+                .reset_index()
+            )
+            collapsed = collapsed.merge(span_stats, on="system_variant", how="left")
+
+        return collapsed
+
+    wide_tables = []
+    for idx, (case_name, df_case) in enumerate(case_tables):
+        suffix = _safe_suffix(case_name)
+
+        df_case = df_case[df_case["system_variant"].isin(common)].copy()
+        df_case = _collapse_one_case(df_case)
+
+        # Keep system_family only once (unsuffixed) if present
+        if idx > 0 and "system_family" in df_case.columns:
+            df_case = df_case.drop(columns=["system_family"])
+
+        # Drop case column before widening
+        if "case" in df_case.columns:
+            df_case = df_case.drop(columns=["case"])
+
+        # Suffix all columns except system_variant
+        ren = {}
+        for c in df_case.columns:
+            if c == "system_variant":
+                continue
+            ren[c] = f"{c}__{suffix}"
+        df_case = df_case.rename(columns=ren)
+
+        wide_tables.append(df_case)
+
+    merged = wide_tables[0]
+    for t in wide_tables[1:]:
+        merged = merged.merge(t, on="system_variant", how="inner")
+
+    # Guarantee uniqueness
+    if merged["system_variant"].duplicated().any():
+        dups = merged.loc[merged["system_variant"].duplicated(), "system_variant"].head(10).tolist()
+        raise ValueError(f"[summary] Root wide merge still has duplicate system_variant rows (e.g., {dups}).")
+
+    merged.to_csv(out_dir / "summary_ranked_all.csv", index=False)
+    logger.info("[summary] Wrote %s (wide) and %s (long).", out_dir / "summary_ranked_all.csv", out_dir / "summary_ranked_all_long.csv")
 
 def run_codechecks_on_winners(
     *,
@@ -257,6 +524,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     # Per-case sweep + rank exports
     # -------------------------
     all_ranked_all: List[pd.DataFrame] = []
+    all_evaluated: List[pd.DataFrame] = []   # <-- NEW: post-systems evaluated candidates
+
     for _, row in loads_df_cases.iterrows():
         case_name = str(row.get("load_case", "case"))
         case_out_dir = utils_mod.ensure_dir(out_dir / f"systems_{case_name}")
@@ -279,6 +548,17 @@ def main(argv: Optional[List[str]] = None) -> None:
             logger=logger,
         )
 
+        # -------------------------
+        # Save the "evaluated/post-systems" population for Option B
+        # (this is the correct denominator for evaluated pass rate)
+        # -------------------------
+        ce = candidates_case_all.copy()
+        if "system_variant" in ce.columns:
+            ce["system_variant"] = ce["system_variant"].astype(str).str.strip()
+        if "system_family" in ce.columns:
+            ce["system_family"] = ce["system_family"].astype(str).str.strip()
+        all_evaluated.append(ce)
+
         if candidates_case_all is None or candidates_case_all.empty:
             logger.warning("[run] Case %s: no candidates.", case_name)
             continue
@@ -290,8 +570,6 @@ def main(argv: Optional[List[str]] = None) -> None:
             candidates_case_all["floor_load_category"] = case_name
         if "case" not in candidates_case_all.columns:
             candidates_case_all["case"] = case_name
-        if "_source_case" not in candidates_case_all.columns:
-            candidates_case_all["_source_case"] = case_name
 
         summaries_case = rank_mod.rank_and_export_summary(
             candidates_case_all,
@@ -303,17 +581,177 @@ def main(argv: Optional[List[str]] = None) -> None:
             logger=logger,
         )
 
+        # -------------------------
+        # Immediately collapse per-case summary_ranked_all.csv to 1 row per system_variant
+        # (THIS is where duplicates from span sweep must be removed)
+        # -------------------------
+        try:
+            case_summary_path = case_out_dir / "summary_ranked_all.csv"
+
+            # Prefer the file written by rank_and_export_summary (authoritative)
+            if case_summary_path.exists():
+                df_case_summary = pd.read_csv(case_summary_path)
+            else:
+                # fallback to whatever the rank module returned
+                df_case_summary = summaries_case.get("summary_ranked_all", pd.DataFrame())
+                if df_case_summary is None or df_case_summary.empty:
+                    df_case_summary = summaries_case.get("ranked_all", pd.DataFrame())
+
+            if df_case_summary is not None and not df_case_summary.empty:
+                df_case_collapsed = collapse_summary_ranked_all_by_system_variant(df_case_summary)
+
+                # preserve case label for downstream merging
+                if "case" not in df_case_collapsed.columns:
+                    df_case_collapsed["case"] = case_name
+
+                # overwrite the per-case summary so it is unique-by-variant going forward
+                df_case_collapsed.to_csv(case_summary_path, index=False)
+                logger.info("[run] Case %s: collapsed summary_ranked_all.csv %d -> %d rows",
+                            case_name, len(df_case_summary), len(df_case_collapsed))
+            else:
+                logger.warning("[run] Case %s: no summary_ranked_all found to collapse.", case_name)
+
+        except Exception:
+            logger.exception("[run] Case %s: failed to collapse per-case summary_ranked_all.csv", case_name)
+
         ra = summaries_case.get("ranked_all", pd.DataFrame())
-        if isinstance(ra, pd.DataFrame) and not ra.empty:
-            # also ensure the *ranked* output keeps the column even if rank reorders
-            if "floor_load_category" not in ra.columns:
-                ra = ra.copy()
-                ra["floor_load_category"] = case_name
-            if "case" not in ra.columns:
-                ra["case"] = case_name
-            all_ranked_all.append(ra)
+    if isinstance(ra, pd.DataFrame) and not ra.empty:
+        ra = ra.copy()
+
+        # ensure case tags exist
+        if "floor_load_category" not in ra.columns:
+            ra["floor_load_category"] = case_name
+        if "case" not in ra.columns:
+            ra["case"] = case_name
+
+        # normalize ids
+        if "system_variant" in ra.columns:
+            ra["system_variant"] = ra["system_variant"].astype(str).str.strip()
+        if "system_family" in ra.columns:
+            ra["system_family"] = ra["system_family"].astype(str).str.strip()
+
+        # coerce span numeric so it aggregates correctly
+        if "span" in ra.columns:
+            ra["span"] = pd.to_numeric(ra["span"], errors="coerce")
+
+        # ---- THIS is the critical dedupe/aggregation: one row per (case, family, variant) ----
+        group_cols = [c for c in ["case", "system_family", "system_variant"] if c in ra.columns]
+        if "system_variant" not in group_cols:
+            raise ValueError("[run] ranked_all is missing system_variant; cannot collapse duplicates")
+
+        # if span sweep created multiple rows per variant, collapse them NOW
+        if ra.duplicated(subset=group_cols, keep=False).any():
+            agg = {}
+            for c in ra.columns:
+                if c in group_cols:
+                    continue
+
+                cl = c.lower()
+
+                # booleans
+                if pd.api.types.is_bool_dtype(ra[c]):
+                    agg[c] = "all" if "pass" in cl else "first"
+                    continue
+
+                # numerics
+                if pd.api.types.is_numeric_dtype(ra[c]):
+                    if "rank" in cl:
+                        agg[c] = "min"          # best rank
+                    elif "span" in cl:
+                        agg[c] = "max"          # merge span sweep -> keep max span
+                    elif any(s in cl for s in ["depth", "util", "unity", "dcr", "demand", "mass", "carbon", "co2", "kgco2", "cost"]):
+                        agg[c] = "max"          # conservative merge for sizing/constraints/cost/carbon
+                    else:
+                        agg[c] = "first"
+                else:
+                    agg[c] = "first"
+
+            ra = (
+                ra.groupby(group_cols, dropna=False, as_index=False)
+                .agg(agg)
+            )
+
+        all_ranked_all.append(ra)
 
         logger.info("[run] Case %s: done (candidates=%d)", case_name, len(candidates_case_all))
+
+    # -------------------------
+    # Build ROOT summary files EARLY from the (now-collapsed) per-case summaries
+    # -------------------------
+    try:
+        # Load collapsed per-case summaries
+        case_dirs = sorted([p for p in out_dir.iterdir() if p.is_dir() and p.name.startswith("systems_")])
+        case_tables = []
+        for d in case_dirs:
+            p = d / "summary_ranked_all.csv"
+            if not p.exists():
+                continue
+            df = pd.read_csv(p)
+            if df is None or df.empty or "system_variant" not in df.columns:
+                continue
+            case_name = d.name[len("systems_"):] or d.name
+            df = df.copy()
+            df["case"] = case_name
+            df["system_variant"] = df["system_variant"].astype(str).str.strip()
+            case_tables.append((case_name, df))
+
+        if case_tables:
+            # intersection of variants across cases (inner join semantics)
+            common = None
+            for case_name, df in case_tables:
+                keys = set(df["system_variant"].dropna().unique().tolist())
+                common = keys if common is None else (common & keys)
+            common = sorted(common) if common else []
+
+            if not common:
+                pd.DataFrame().to_csv(out_dir / "summary_ranked_all_long.csv", index=False)
+                pd.DataFrame().to_csv(out_dir / "summary_ranked_all.csv", index=False)
+            else:
+                # long
+                long_df = pd.concat(
+                    [df[df["system_variant"].isin(common)].copy() for _, df in case_tables],
+                    ignore_index=True,
+                    sort=False,
+                )
+                long_df.to_csv(out_dir / "summary_ranked_all_long.csv", index=False)
+
+                # wide (1 row per system_variant)
+                import re as _re
+                def _safe_suffix(x: str) -> str:
+                    x = _re.sub(r"[^A-Za-z0-9]+", "_", str(x)).strip("_")
+                    return x or "case"
+
+                wide_tables = []
+                for i, (case_name, df) in enumerate(case_tables):
+                    suffix = _safe_suffix(case_name)
+                    t = df[df["system_variant"].isin(common)].copy()
+
+                    # keep system_family only once if present
+                    if i > 0 and "system_family" in t.columns:
+                        t = t.drop(columns=["system_family"])
+
+                    # drop case col before suffixing
+                    if "case" in t.columns:
+                        t = t.drop(columns=["case"])
+
+                    ren = {c: f"{c}__{suffix}" for c in t.columns if c != "system_variant"}
+                    t = t.rename(columns=ren)
+                    wide_tables.append(t)
+
+                merged = wide_tables[0]
+                for t in wide_tables[1:]:
+                    merged = merged.merge(t, on="system_variant", how="inner")
+
+                if merged["system_variant"].duplicated().any():
+                    raise ValueError("[root summary] duplicate system_variant rows still present (should be impossible after collapse).")
+
+                merged.to_csv(out_dir / "summary_ranked_all.csv", index=False)
+
+        else:
+            logger.warning("[root summary] No per-case collapsed summaries found to build root summaries.")
+
+    except Exception:
+        logger.exception("[root summary] Failed to build root summary_ranked_all_long.csv and summary_ranked_all.csv")
 
     # -------------------------
     # Expand winners to per-floor materials (optional convenience)
@@ -334,155 +772,6 @@ def main(argv: Optional[List[str]] = None) -> None:
             )
     except Exception:
         logger.exception("[takeoff] Failed global expanded materials write")
-
-        # -------------------------
-        # Build GLOBAL summary outputs:
-        #   - summary_ranked_all_long.csv : what EDCA previously wrote to summary_ranked_all.csv
-        #       (collapsed/aggregated across cases over the *intersection* of systems)
-        #   - summary_ranked_all.csv      : NEW wide inner-join merge across case subfolders
-        #       (exactly one row per system_variant)
-        # -------------------------
-        ranked_union = pd.concat(all_ranked_all, ignore_index=True, sort=False) if all_ranked_all else pd.DataFrame()
-
-        if not ranked_union.empty:
-            if "system_variant" not in ranked_union.columns:
-                raise ValueError(
-                    "Cannot build global summary: no system identifier column found "
-                    "(expected system_variant)."
-                )
-
-            # --- normalize join key to avoid whitespace mismatches
-            def _norm_variant(s):
-                return str(s).strip()
-
-            # Compute intersection of system_variants present in EVERY case
-            common_variants = None
-            for df_case in all_ranked_all:
-                if df_case is None or df_case.empty or "system_variant" not in df_case.columns:
-                    continue
-                keys = df_case[["system_variant"]].copy()
-                keys["system_variant"] = keys["system_variant"].map(_norm_variant)
-                keys = keys.drop_duplicates()
-                common_variants = keys if common_variants is None else common_variants.merge(
-                    keys, on=["system_variant"], how="inner"
-                )
-
-            if common_variants is None or common_variants.empty:
-                # nothing common across cases — write empty files so downstream doesn't crash mysteriously
-                pd.DataFrame().to_csv(Path(out_dir) / "summary_ranked_all_long.csv", index=False)
-                pd.DataFrame().to_csv(Path(out_dir) / "summary_ranked_all.csv", index=False)
-            else:
-                # Filter the union to only common systems
-                ranked_common = ranked_union.copy()
-                ranked_common["system_variant"] = ranked_common["system_variant"].map(_norm_variant)
-                ranked_common = ranked_common.merge(common_variants, on=["system_variant"], how="inner")
-
-                # -------------------------
-                # (A) Long file = what you USED to write to summary_ranked_all.csv
-                #     i.e., collapsed across cases using groupby+aggregation.
-                # -------------------------
-                join_cols = []
-                if all(c in ranked_common.columns for c in ["system_family", "system_variant"]):
-                    join_cols = ["system_family", "system_variant"]
-                else:
-                    join_cols = ["system_variant"]
-
-                def _agg_rule(col: str) -> str:
-                    # worst-case across cases for sizing/constraints-ish metrics:
-                    if any(s in col for s in ["depth", "util", "unity", "dcr", "demand", "mass", "carbon", "cost"]):
-                        return "max"
-                    return "first"
-
-                agg = {}
-                for c in ranked_common.columns:
-                    if c in join_cols:
-                        continue
-                    if pd.api.types.is_numeric_dtype(ranked_common[c]):
-                        agg[c] = _agg_rule(c)
-                    else:
-                        agg[c] = "first"
-
-                summary_ranked_all_old_behavior = (
-                    ranked_common
-                    .groupby(join_cols, dropna=False, as_index=False)
-                    .agg(agg)
-                )
-
-                # <-- this is what summary_ranked_all.csv USED to be
-                summary_ranked_all_old_behavior.to_csv(
-                    Path(out_dir) / "summary_ranked_all_long.csv",
-                    index=False
-                )
-
-                # -------------------------
-                # (B) Condensed file = TRUE inner-join MERGE across case tables
-                #     One row per system_variant; columns suffixed by case name.
-                # -------------------------
-                import re as _re
-
-                def _safe_suffix(x: str) -> str:
-                    x = _re.sub(r"[^A-Za-z0-9]+", "_", str(x)).strip("_")
-                    return x or "case"
-
-                def _best_per_variant(df: pd.DataFrame) -> pd.DataFrame:
-                    """Ensure at most one row per system_variant within a case."""
-                    D = df.copy()
-                    D["system_variant"] = D["system_variant"].map(_norm_variant)
-
-                    # Prefer best by rank columns if available
-                    sort_cols = [c for c in ["rank_overall", "rank_carbon", "rank", "carbon_total_kgCO2", "cost_total"] if c in D.columns]
-                    if sort_cols:
-                        D = D.sort_values(by=sort_cols, ascending=True, kind="mergesort")
-
-                    return D.drop_duplicates(subset=["system_variant"], keep="first")
-
-                wide_tables = []
-                for i, df_case in enumerate(all_ranked_all):
-                    if df_case is None or df_case.empty or "system_variant" not in df_case.columns:
-                        continue
-
-                    # pick a readable suffix for this case
-                    if "case" in df_case.columns and df_case["case"].notna().any():
-                        case_name = str(df_case["case"].dropna().iloc[0])
-                    elif "occupancy" in df_case.columns and df_case["occupancy"].notna().any():
-                        case_name = str(df_case["occupancy"].dropna().iloc[0])
-                    else:
-                        case_name = f"case_{i+1}"
-
-                    suffix = _safe_suffix(case_name)
-
-                    D = _best_per_variant(df_case)
-                    D = D.merge(common_variants, on=["system_variant"], how="inner")
-
-                    # Keep system_family once (unsuffixed) if present; drop it from subsequent cases
-                    if i > 0 and "system_family" in D.columns:
-                        D = D.drop(columns=["system_family"])
-
-                    # Rename all non-key columns with suffix to avoid collisions
-                    ren = {}
-                    for c in D.columns:
-                        if c == "system_variant":
-                            continue
-                        ren[c] = f"{c}__{suffix}"
-                    D = D.rename(columns=ren)
-
-                    wide_tables.append(D)
-
-                if not wide_tables:
-                    pd.DataFrame().to_csv(Path(out_dir) / "summary_ranked_all.csv", index=False)
-                else:
-                    merged = wide_tables[0]
-                    for t in wide_tables[1:]:
-                        merged = merged.merge(t, on=["system_variant"], how="inner")
-
-                    # Guarantee uniqueness: one row per system_variant
-                    if merged["system_variant"].duplicated().any():
-                        raise ValueError(
-                            "Condensed summary merge produced duplicate system_variant rows. "
-                            "Check your per-case inputs."
-                        )
-
-                    merged.to_csv(Path(out_dir) / "summary_ranked_all.csv", index=False)
 
     # -------------------------
     # Code checks (winners only)
@@ -513,15 +802,30 @@ def main(argv: Optional[List[str]] = None) -> None:
         if ranked_union is None or ranked_union.empty:
             logger.warning('[reporting] No ranked results to report; skipping.')
         else:
-            reporting_mod.write_edca_reports(
-                candidates_input=ranked_union,
-                summary_df=ranked_union,
-                out_dir=out_dir,
-                metric='carbon_per_m2',
-            )
+            evaluated_union = pd.concat(all_evaluated, ignore_index=True, sort=False) if all_evaluated else pd.DataFrame()
+            ranked_union = pd.concat(all_ranked_all, ignore_index=True, sort=False) if all_ranked_all else pd.DataFrame()
+            if evaluated_union is None or evaluated_union.empty:
+                logger.warning("[reporting] No evaluated results (post systems.py) to report; skipping.")
+            else:
+                # Use ranked_union ONLY as the source of "which variants are passing"
+                # (reporting.py will infer the passing set via pass_overall/success mask)
+                reporting_mod.write_edca_reports(
+                    candidates_input=evaluated_union,  # <-- Option B denom (post systems.py)
+                    summary_df=ranked_union,           # <-- pass-set source (NOT the denom)
+                    out_dir=out_dir,
+                    metric="carbon_per_m2",
+                )
             logger.info('[reporting] Wrote reports -> %s', Path(out_dir) / 'reporting')
     except Exception:
         logger.exception('[reporting] Failed to write reports')
+
+     # -------------------------
+    # Finalize root summaries LAST (prevents later steps from leaving a long-form summary_ranked_all.csv)
+    # -------------------------
+    try:
+        finalize_root_summary_ranked_all(out_dir=out_dir, logger=logger)
+    except Exception:
+        logger.exception("[summary] Failed to finalize root summary_ranked_all.csv")
 
     logger.info("[run_edca] Done.")
 

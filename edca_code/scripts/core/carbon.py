@@ -206,6 +206,23 @@ def compute_assembly_carbon_from_bom(
         total_a5 += float(a5)
         total_cost += float(cost)
 
+    # --- breakdown totals (useful for keeping carbon separate by material / category)
+    # Normalise categories so the downstream tables can have stable column names.
+    # e.g. steel_kg + steel_m3 -> steel
+    totals_by_category: Dict[str, float] = {}
+    totals_by_material_id: Dict[str, float] = {}
+
+    for row in per_material:
+        cat_raw = str(row.get("category", "") or "")
+        cat = "steel" if cat_raw.startswith("steel") else cat_raw  # steel_kg / steel_m3 -> steel
+        mat_id = str(row.get("material_id", "") or "")
+        tot = _safe_float(row.get("total", 0.0))
+
+        if cat:
+            totals_by_category[cat] = totals_by_category.get(cat, 0.0) + tot
+        if mat_id:
+            totals_by_material_id[mat_id] = totals_by_material_id.get(mat_id, 0.0) + tot
+
     overall_total = float(total_a1a3 + (total_a4 if include_a4_a5 else 0.0) + (total_a5 if include_a4_a5 else 0.0))
 
     totals = {
@@ -215,7 +232,12 @@ def compute_assembly_carbon_from_bom(
         "total": overall_total,
         "total_cost": float(total_cost),}
 
-    return {"per_material": per_material, "totals": totals}
+    return {
+        "per_material": per_material,
+        "totals": totals,
+        "totals_by_category": totals_by_category,
+        "totals_by_material_id": totals_by_material_id,
+        }
 
 # -------------------------
 # Convenience wrapper
