@@ -27,6 +27,9 @@ def pcf_to_kgm3(pcf: float) -> float:
 def psf_to_nm2(psf: float) -> float:
     return psf * 47.8803
 
+def psf_to_knm2(psf: float) -> float:
+    return psf * 0.0478803
+
 def in2_to_mm2(inches2: float) -> float:
     return inches2 * 645.16
 
@@ -64,7 +67,7 @@ def m2_to_ft2(m2: float) -> float:
 
 # Metric Conversions
 def kgm3_to_kN_m3(kgm3: float) -> float:
-    return float(kgm3) * G / 1000.0
+    return float(kgm3) * 9.80665 / 1000.0
 
 def psi_to_MPa(psi: float) -> float:
     return float(psi) * 0.00689476

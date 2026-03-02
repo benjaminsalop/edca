@@ -33,7 +33,7 @@ LOCAL_DEFAULTS = {
     "fallback_slab_width_m": 1.0
 }
 
-def _load_yaml(path: str | Path) -> dict:
+def load_yaml(path: str | Path) -> dict:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"YAML not found: {p}")
@@ -41,7 +41,7 @@ def _load_yaml(path: str | Path) -> dict:
         return yaml.safe_load(fh)
 
 
-def _choose_rebar_for_As_required(as_req_mm2_per_m: float,
+def choose_rebar_for_As_required(as_req_mm2_per_m: float,
                                   metric_only: bool = True) -> Optional[RebarSpec]:
     """
     Find the smallest standard rebar spec (area per m) in the rebar databases that
@@ -51,7 +51,7 @@ def _choose_rebar_for_As_required(as_req_mm2_per_m: float,
     """
     candidates: list[tuple[float, RebarSpec]] = []
 
-    def _spec_area_per_m(spec: RebarSpec) -> float:
+    def spec_area_per_m(spec: RebarSpec) -> float:
         # spec.area_mm2 available via RebarSpec API (assumed)
         # compute bars per m from spacing: if spacing unit is 'mm' treat spacing as mm
         try:
@@ -62,27 +62,36 @@ def _choose_rebar_for_As_required(as_req_mm2_per_m: float,
             d_mm = spec.diameter_mm
             area_single = math.pi * (d_mm / 2.0) ** 2
         # spacing unit handling: many specs use spacing in mm or in
-        if getattr(spec, "spacing_unit", None) == "mm":
-            spacing_m = spec.spacing / 1000.0
-        elif getattr(spec, "spacing_unit", None) == "in":
-            spacing_m = spec.spacing * 0.0254
+
+        spacing_val = getattr(spec, "spacing", None)
+        spacing_unit = getattr(spec, "spacing_unit", None)
+        if spacing_val is None:
+            # fallback huge spacing (effectively zero bars per m)
+            spacing_m = 1e6
         else:
-            # if spacing unit not provided, try to interpret numeric as mm
-            spacing_m = getattr(spec, "spacing", 1000.0) / 1000.0
+            try:
+                if spacing_unit == "mm":
+                    spacing_m = float(spacing_val) / 1000.0
+                elif spacing_unit == "in":
+                    spacing_m = float(spacing_val) * 0.0254
+                else:
+                    spacing_m = float(spacing_val) / 1000.0
+            except Exception:
+                spacing_m = 1e6
         bars_per_m = 1.0 / spacing_m if spacing_m > 0 else 0.0
         return area_single * bars_per_m
 
-    def _collect_from_dict(d: dict):
+    def collect_from_dict(d: dict):
         for spec in d.values():
             try:
-                a = _spec_area_per_m(spec)
+                a = spec_area_per_m(spec)
                 candidates.append((a, spec))
             except Exception:
                 continue
 
-    _collect_from_dict(METRIC_REBAR_BY_SPEC)
+    collect_from_dict(METRIC_REBAR_BY_SPEC)
     if not metric_only:
-        _collect_from_dict(IMPERIAL_REBAR_BY_SPEC)
+        collect_from_dict(IMPERIAL_REBAR_BY_SPEC)
 
     # sort by area ascending
     candidates.sort(key=lambda x: x[0])
@@ -214,7 +223,7 @@ def ultimate_loading(permanent_load_kN_m2: float,
 
     # 1) Try simple 'combos' format (legacy)
     if load_combos_yaml and Path(load_combos_yaml).exists():
-        cfg = _load_yaml(load_combos_yaml)
+        cfg = load_yaml(load_combos_yaml)
         if isinstance(cfg, dict) and 'combos' in cfg:
             for name, expr in (cfg.get('combos') or {}).items():
                 gcoef = expr.get('G', expr.get('g', None))
@@ -227,7 +236,7 @@ def ultimate_loading(permanent_load_kN_m2: float,
         elif isinstance(cfg, dict) and 'EN1990' in cfg:
             vals = None
             if load_values_yaml and Path(load_values_yaml).exists():
-                vals = _load_yaml(load_values_yaml)
+                vals = load_yaml(load_values_yaml)
 
             psi_root = (vals.get('psi', {}) if isinstance(vals, dict) else {})
             # iterate ULS entries if present
@@ -380,7 +389,7 @@ def flexural_design(ultimate_load_kN_m2: float,
 
     required_ext_As_mm2_per_m = M_ed_Nmm / (z_mm * f_yd_MPa * 1e3)  # f_yd MPa -> N/mm2 ; multiply by 1e3 to get N/mm2 * mm -> N
 
-    selected_spec_ext = _choose_rebar_for_As_required(required_ext_As_mm2_per_m, metric_only=True)
+    selected_spec_ext = choose_rebar_for_As_required(required_ext_As_mm2_per_m, metric_only=True)
     allowable_ext_As_mm2_per_m = None
     if selected_spec_ext is not None:
         area_single_mm2 = selected_spec_ext.area_mm2
@@ -399,7 +408,7 @@ def flexural_design(ultimate_load_kN_m2: float,
 
     M_int_Nmm = internal_moment_kNm_per_m * 1e6
     required_int_As_mm2_per_m = M_int_Nmm / (z_mm * f_yd_MPa * 1e3)
-    selected_spec_int = _choose_rebar_for_As_required(required_int_As_mm2_per_m, metric_only=True)
+    selected_spec_int = choose_rebar_for_As_required(required_int_As_mm2_per_m, metric_only=True)
     allowable_int_As_mm2_per_m = None
     if selected_spec_int is not None:
         area_single_mm2 = selected_spec_int.area_mm2
@@ -597,18 +606,47 @@ def check_slab_row_preserve_math(row: Dict[str, Any],
     Pulls material via material_csv_path and computes loads, ULS combos, flex/defl/shear.
     Returns a dict with G, Q, chosen ULS, flex, deflection and shear results.
     """
-    
+
+    # -----------------------------
+    # Robust parsing helpers
+    # -----------------------------
+    def _is_missing(v: Any) -> bool:
+        try:
+            return v is None or (isinstance(v, str) and v.strip() == "") or pd.isna(v)
+        except Exception:
+            return v is None or (isinstance(v, str) and v.strip() == "")
+
+    def _f(key: str, default: float) -> float:
+        v = row.get(key, default)
+        if _is_missing(v):
+            v = default
+        try:
+            return float(v)
+        except Exception:
+            return float(default)
+
+    def _f2(key1: str, key2: str, default: float) -> float:
+        v = row.get(key1, None)
+        if _is_missing(v):
+            v = row.get(key2, default)
+        if _is_missing(v):
+            v = default
+        try:
+            return float(v)
+        except Exception:
+            return float(default)
+
     # read geometry from row (caller should provide these; fallbacks are minimal)
-    slab_depth_m = float(row.get("slab_depth", row.get("depth", 0.175)))
-    slab_width_m = float(row.get("slab_width", LOCAL_DEFAULTS['fallback_slab_width_m']))
-    slab_length_m = float(row.get("span", row.get("max_span", LOCAL_DEFAULTS['fallback_span_m'])))
-    screed_depth_m = float(row.get("screed_depth", 0.0))
-    live_load_kN_m2 = float(row.get("live_load_kN_m2", row.get("ll", 2.0)))
-    partition_load_kN_m2 = float(row.get("partition_load_kN_m2", 0.0))
-    cover_m = float(row.get("cover_m", row.get("nominal_cover_m", 0.015)))
-    deviation_allowance_m = float(row.get("deviation_allowance_m", row.get("deviation_m", 0.01)))
-    wall_thickness_m = float(row.get("wall_thickness_m", 0.2))
-    d_rebar_m = float(row.get("d_bar_m", LOCAL_DEFAULTS['d_bar_m']))
+    slab_depth_m = _f2("slab_depth", "depth", 0.175)
+    slab_width_m = _f("slab_width", LOCAL_DEFAULTS["fallback_slab_width_m"])
+    slab_length_m = _f2("span", "max_span", LOCAL_DEFAULTS["fallback_span_m"])
+    screed_depth_m = _f("screed_depth", 0.0)
+    live_load_kN_m2 = _f2("live_load_kN_m2", "ll", 2.0)
+    partition_load_kN_m2 = _f("partition_load_kN_m2", 0.0)
+    cover_m = _f2("cover_m", "nominal_cover_m", 0.015)
+    deviation_allowance_m = _f2("deviation_allowance_m", "deviation_m", 0.01)
+    wall_thickness_m = _f("wall_thickness_m", 0.2)
+    d_rebar_m = _f("d_bar_m", LOCAL_DEFAULTS["d_bar_m"])
 
     material_id = row.get("material_id")
     if material_csv_path and material_id:
@@ -627,19 +665,21 @@ def check_slab_row_preserve_math(row: Dict[str, Any],
                        raw=row)
 
     # permanent & variable loads
-    G_kN_m2 = permanent_loading(slab_depth_m=slab_depth_m,
+    G_kN_m2 = permanent_loading(
+                                slab_depth_m=slab_depth_m,
                                 slab_width_m=slab_width_m,
                                 screed_depth_m=screed_depth_m,
                                 concrete_density_kN_m3=mat.density_kN_m3,
                                 screed_density_kN_m3=mat.density_kN_m3,
-                                slab_code_loading=float(row.get("slab_code_loading", 0.0)),
-                                screed_code_loading=float(row.get("screed_code_loading", 0.0)),
-                                finish_code_loading=float(row.get("finish_code_loading", 0.0)),
-                                service_code_loading=float(row.get("service_code_loading", 0.0)))
+                                slab_code_loading=_f("slab_code_loading", 0.0),
+                                screed_code_loading=_f("screed_code_loading", 0.0),
+                                finish_code_loading=_f("finish_code_loading", 0.0),
+                                service_code_loading=_f("service_code_loading", 0.0))
+
     Q_kN_m2 = variable_loading(live_load_kN_m2=live_load_kN_m2, partition_load_kN_m2=partition_load_kN_m2)
 
     # ultimate load per your original formula (call with G, Q)
-    psi = row.get("psi_factor", 1.0)
+    psi = _f("psi_factor", 1.0)
     combos = ultimate_loading(permanent_load_kN_m2=G_kN_m2,
                               variable_load_kN_m2=Q_kN_m2,
                               load_combos_yaml=load_combos_yaml,

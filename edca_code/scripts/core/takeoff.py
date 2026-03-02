@@ -3,114 +3,253 @@ from __future__ import annotations
 from typing import Dict, Any, List, Tuple
 from pathlib import Path
 import pandas as pd
+import logging
 
-# Assumptions:
-# - systems_variants rows contain per-m2 volumes for materials:
-#    concrete_volume (m3 per m2), steel_volume (m3 per m2 OR kg per m2 if you prefer),
-#    timber_volume (m3 per m2)
-# - column names match the schema you provided; adapt names if your parquet uses different labels.
-# - takeoff here produces quantities per assembly (or per floor area) in canonical units:
-#    concrete_m3, steel_kg, timber_m3, etc.
-# - If steel_volume is in m3 we convert to kg using material density if available later in carbon.py; here we keep m3 for concrete/timber and m3 or kg for steel depending on the column.
+logger = logging.getLogger("takeoff")
 
-def _ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+def ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     for c in cols:
         if c not in df.columns:
             df[c] = 0.0
     return df
 
+def safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        if pd.isna(x):
+            return float(default)
+    except Exception:
+        pass
+    try:
+        return float(x)
+    except Exception:
+        return float(default)
+
 def bom_per_m2_from_system_row(system_row: pd.Series) -> Dict[str, float]:
     """
     Compute a basic BOM (per m2) for a single system variant row.
-
-    Returns a dict mapping material_id -> quantity per m2, with units implied:
-      - 'concrete:<material_id>': m3 per m2
-      - 'steel:<material_id>': kg per m2  (if variant provides steel_volume in m3 we'll leave as 'steel_m3' key)
-      - 'timber:<material_id>': m3 per m2
-      - 'swt': swt value (if present) kept as numeric quantity (units depend on your catalog)
-
-    Notes:
-      - system_row is a pandas Series with columns: concrete_volume, steel_volume, timber_volume,
-        material_concrete_id, material_steel_id, material_timber_id, swt, screed_depth, etc.
-      - This function makes minimal assumptions; conversion m3->kg is left to carbon.py where material density is known.
+    Returns a dict mapping material_key -> quantity per m2.
     """
     bom: Dict[str, float] = {}
 
-    # concrete
-    conc_m3_per_m2 = float(system_row.get("concrete_volume") or 0.0)
+    # --- concrete volume (explicit)
+    conc_m3_per_m2 = safe_float(system_row.get("concrete_volume", 0.0))
     mat_conc = system_row.get("material_concrete_id") or "concrete"
     if conc_m3_per_m2 and mat_conc:
         bom[f"concrete:{mat_conc}"] = conc_m3_per_m2
 
-    # steel: some catalogs store steel as m3 (steel_volume) or as kg (steel_mass_per_m2) - attempt both
-    steel_vol = system_row.get("steel_volume", None)
-    steel_mat = system_row.get("material_steel_id") or "steel"
-    if steel_vol and steel_mat:
-        bom[f"steel_m3:{steel_mat}"] = float(steel_vol)
+    # --- screed / topping: screed_depth may be stored in mm or m
+    screed_depth = system_row.get("screed_depth", 0.0)
+    screed_m = safe_float(screed_depth, 0.0)
+    # heuristic: if screed depth > 5, assume mm and convert to metres
+    if screed_m > 5:
+        screed_m = screed_m / 1000.0
+    if screed_m > 0.0:
+        screed_mat = system_row.get("material_pt_id") or "screed"
+        # screed is treated as a concrete/topping volumetric addition (m3/m2)
+        bom[f"concrete:{screed_mat}"] = bom.get(f"concrete:{screed_mat}", 0.0) + screed_m
 
-    # timber
-    timber_m3 = float(system_row.get("timber_volume") or 0.0)
+    # --- steel: try multiple possible columns (volume or mass)
+    # --- steel: prefer mass if present, else volume (avoid double counting)
+    steel_mat = system_row.get("material_steel_id") or "steel"
+
+    steel_mass = (
+        system_row.get("steel_mass_per_m2")
+        or system_row.get("steel_kg_per_m2")
+        or system_row.get("steel_mass")
+    )
+    if steel_mass is not None and safe_float(steel_mass, 0.0) > 0.0:
+        bom[f"steel_kg:{steel_mat}"] = safe_float(steel_mass)
+    else:
+        steel_vol = system_row.get("steel_volume") or system_row.get("steel_m3_per_m2")
+        if steel_vol is not None and safe_float(steel_vol, 0.0) > 0.0:
+            bom[f"steel_m3:{steel_mat}"] = safe_float(steel_vol)
+
+    # NOTE: do not include record-only fields (e.g. swt) in BOM; keep BOM strictly material quantities
+
+    # --- timber
+    timber_m3 = safe_float(system_row.get("timber_volume", 0.0))
     timber_mat = system_row.get("material_timber_id") or "timber"
     if timber_m3 and timber_mat:
         bom[f"timber:{timber_mat}"] = timber_m3
 
-    # screed / topping (if screed depth is given as m thickness and density is known later)
-    screed_m = float(system_row.get("screed_depth") or 0.0)
-    if screed_m:
-        # approximate screed volume per m2 is screed_m (m3/m2)
-        screed_mat = system_row.get("material_pt_id") or "screed"
-        bom[f"concrete:{screed_mat}"] = bom.get(f"concrete:{screed_mat}", 0.0) + screed_m
-
-    # keep SDL / LL / swt for record (not a material)
-    if "swt" in system_row:
-        bom["swt"] = float(system_row.get("swt") or 0.0)
-
     return bom
-
 
 def expand_bom_to_floor(bom_per_m2: Dict[str, float], floor_area_m2: float, assemblies: int = 1) -> Dict[str, float]:
     """
     Multiply per-m2 BOM to floor-level quantities.
-    - floor_area_m2: total gross floor area covered by the assembly or the sum of assembly footprints
-    - assemblies: number of repeated assemblies on the floor (if you already account for footprint, keep assemblies=1)
+    - floor_area_m2: total gross floor area covered by the assembly
+    - assemblies: number of identical assemblies per floor (default 1)
     Returns mapping material_key -> total quantity for the floor.
     """
     factor = float(floor_area_m2) * int(assemblies)
-    out = {}
+    out: Dict[str, float] = {}
     for k, v in bom_per_m2.items():
         out[k] = float(v) * factor
     return out
-
 
 def combined_floor_takeoffs(systems_df: pd.DataFrame,
                             floor_area_lookup: Dict[int, float],
                             mapping_system_to_floor: Dict[int, str]) -> Dict[int, Dict[str, float]]:
     """
     For each floor (keyed by floor number) compute the combined floor-level material totals.
-
-    Parameters:
-      - systems_df: DataFrame of candidate systems (filter results). Must contain 'system_variant' or a unique id.
-      - floor_area_lookup: mapping floor_number -> area in m2
-      - mapping_system_to_floor: mapping floor_number -> system_variant string (i.e., which system applies to that floor)
-
-    Returns:
-      - dict: floor_number -> {material_key: total_qty}
     """
-    results = {}
-    # create index by system_variant
-    sys_index = systems_df.set_index("system_variant") if "system_variant" in systems_df.columns else systems_df
+    results: Dict[int, Dict[str, float]] = {}
+
+    # ensure we have an index we can query by variant name
+    if "system_variant" in systems_df.columns:
+        sys_index = systems_df.set_index("system_variant", drop=False)
+    else:
+        # if no variant column, create an index from the DataFrame index but warn the user
+        sys_index = systems_df.copy()
+        logger.warning("combined_floor_takeoffs: systems_df has no 'system_variant' column; using integer index. Prefer 'system_variant' for reliable lookup.")
 
     for floor, system_variant in mapping_system_to_floor.items():
         if system_variant not in sys_index.index:
-            raise KeyError(f"System variant '{system_variant}' for floor {floor} not found in systems catalog")
+            raise KeyError(f"System variant '{system_variant}' for floor {floor} not found in systems catalog (checked index).")
         row = sys_index.loc[system_variant]
-        # if multiple rows match, take the first
+        # if multiple rows match, take the first and log a warning
         if isinstance(row, pd.DataFrame):
+            logger.warning("Multiple rows found for system_variant '%s'; using first match.", system_variant)
             row = row.iloc[0]
+
+        # compute bom per m2 and expand to floor
         bom_m2 = bom_per_m2_from_system_row(row)
-        area = float(floor_area_lookup.get(floor, 0.0))
-        # assemblies default to 1: caller can pre-compute effective assemblies if needed
+        area = safe_float(floor_area_lookup.get(floor, 0.0))
         floor_bom = expand_bom_to_floor(bom_m2, area, assemblies=1)
         results[int(floor)] = floor_bom
 
     return results
+
+def materials_per_floor_dataframe_from_combined(combined_floor_boms: dict, materials_df: 'pd.DataFrame' = None) -> 'pd.DataFrame':
+    """
+    Convert the combined_floor_takeoffs mapping into a tidy DataFrame.
+    """
+    rows = []
+
+    # Pre-index materials metadata once (big performance + reliability win)
+    materials = None
+    material_unit_col = None
+    if isinstance(materials_df, pd.DataFrame):
+        if "material_id" in materials_df.columns:
+            materials = materials_df.set_index("material_id", drop=False)
+        else:
+            # allow index-as-material_id
+            materials = materials_df
+
+        for c in ("unit", "uom", "quantity_unit", "measure_unit"):
+            if c in materials_df.columns:
+                material_unit_col = c
+                break
+
+    for floor, bom in (combined_floor_boms or {}).items():
+        for mat_key, qty in (bom or {}).items():
+            if not mat_key or qty is None:
+                continue
+            parts = mat_key.split(":", 1)
+            if len(parts) == 2:
+                mat_type, mat_id = parts[0], parts[1]
+            else:
+                mat_type, mat_id = parts[0], ""
+
+            # best-effort unit inference
+            if mat_type.endswith("_kg") or mat_type == "steel_kg":
+                q_unit = "kg"
+            elif mat_type.startswith("steel_") and mat_type.endswith("m3"):
+                q_unit = "m3"
+            elif mat_type in ("concrete", "timber", "screed", "deck") or mat_type.endswith("m3"):
+                q_unit = "m3"
+            else:
+                # fallback: if materials_df has entry for material_id with a unit field, use that
+                q_unit = None
+                if materials is not None and material_unit_col is not None and mat_id in materials.index:
+                    try:
+                        q_unit = materials.loc[mat_id].get(material_unit_col, None)
+                    except Exception:
+                        q_unit = None
+                if q_unit is None:
+                    q_unit = "unknown"
+
+            rows.append({
+                "floor": int(floor),
+                "material_key": mat_key,
+                "material_type": mat_type,
+                "material_id": mat_id,
+                "quantity": float(qty),
+                "quantity_unit": q_unit,
+            })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        # return canonical empty frame with columns
+        return pd.DataFrame(columns=["floor","material_key","material_type","material_id","quantity","quantity_unit"])
+
+    # sensible ordering
+    df = df.sort_values(["floor","material_type","material_id"]).reset_index(drop=True)
+    return df
+
+def materials_per_floor_csv(candidates_df: 'pd.DataFrame',
+                            materials_df: 'pd.DataFrame' = None,
+                            out_fp: 'Path | str' = None,
+                            floor_area_lookup: dict = None,
+                            mapping_system_to_floor: dict = None) -> 'pd.DataFrame':
+    """
+    High-level helper: given the final candidates DataFrame (the one produced by run_edca),
+    compute combined floor-level takeoffs and write out a CSV summarising material quantities per floor.
+
+    Heuristics used (best-effort):
+      - If mapping_system_to_floor and floor_area_lookup provided, call combined_floor_takeoffs()
+      - Else, try to infer mapping from candidates_df: if columns 'floor' and 'system_variant' present,
+        build mapping by taking the first system_variant per floor and use any area column found.
+    """
+    import pandas as pd
+    from pathlib import Path
+    from math import isnan
+
+    # try to use caller-provided combined mapping if available
+    combined = None
+    if mapping_system_to_floor is not None and floor_area_lookup is not None:
+        combined = combined_floor_takeoffs(candidates_df, floor_area_lookup, mapping_system_to_floor)
+    else:
+        # heuristics: look for 'floor' and 'system_variant' in candidates
+        if isinstance(candidates_df, pd.DataFrame) and "floor" in candidates_df.columns and "system_variant" in candidates_df.columns:
+            # try to find an area column
+            area_col = None
+            for candidate in ("floor_area","area_m2","area","floor_area_m2","plan_area"):
+                if candidate in candidates_df.columns:
+                    area_col = candidate
+                    break
+            # build lookups: for each floor, take the first system_variant and average area
+            mapping = {}
+            area_lookup = {}
+            for floor, group in candidates_df.groupby("floor"):
+                # choose the most common system_variant for that floor
+                sv = group["system_variant"].mode().iloc[0] if not group["system_variant"].mode().empty else group["system_variant"].iloc[0]
+                mapping[int(floor)] = str(sv)
+                if area_col is not None:
+                    # take mean of the area column for rows on that floor (best-effort)
+                    try:
+                        area_lookup[int(floor)] = float(group[area_col].mean())
+                    except Exception:
+                        area_lookup[int(floor)] = 0.0
+                else:
+                    # fallback: try to use a 'gross_floor_area' column
+                    area_lookup[int(floor)] = float(group.get("gross_floor_area", group.get("floor_area_m2", 0.0)).mean() if not group.empty else 0.0)
+            combined = combined_floor_takeoffs(candidates_df, area_lookup, mapping)
+        else:
+            logger.warning("materials_per_floor_csv: could not infer floor mapping from candidates_df; returning empty frame")
+            combined = {}
+
+    # convert to dataframe
+    df = materials_per_floor_dataframe_from_combined(combined, materials_df=materials_df)
+
+    # write to CSV if path provided
+    if out_fp:
+        try:
+            outp = Path(out_fp)
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(outp, index=False)
+            logger.info("[takeoff] Wrote materials per-floor CSV: %s (rows=%d)", outp, len(df))
+        except Exception:
+            logger.exception("[takeoff] Failed to write materials per-floor CSV to %s", out_fp)
+
+    return df

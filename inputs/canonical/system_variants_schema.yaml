@@ -1,66 +1,63 @@
 name: system_variants
+description: Auto-generated schema for system_variants on 2026-02-17T11:26:32.917207+00:00Z
 columns:
-  system_variant:
-    type: string
-    units: ''
-  system_family:
-    type: string
-    units: ''
-  slab_depth:
-    type: number
-    units: ''
-  beam_depth:
-    type: number
-    units: ''
-  screed_depth:
-    type: number
-    units: ''
-  steel_depth:
-    type: number
-    units: ''
-  swt:
-    type: number
-    units: ''
-  sdl:
-    type: number
-    units: ''
-  ll:
-    type: number
-    units: ''
-  max_span:
-    type: number
-    units: ''
-  concrete_volume:
-    type: number
-    units: ''
-  steel_volume:
-    type: number
-    units: ''
-  timber_volume:
-    type: number
-    units: ''
-  material_concrete_id:
-    type: string
-    units: ''
-  material_pt_id:
-    type: string
-    units: ''
-  material_steel_id:
-    type: string
-    units: ''
-  material_timber_id:
-    type: string
-    units: ''
-  ebc_mm:
-    type: number
-    units: ''
-  beam_ref:
-    type: string
-    units: ''
-  source:
-    type: number
-    units: ''
-  notes:
-    type: number
-    units: ''
-notes: Auto-generated basic schema. Please add units & refine types.
+- name: system_variant
+  type: string
+  units: null
+- name: system_family
+  type: string
+  units: null
+- name: unit
+  type: string
+  units: null
+- name: slab_depth
+  type: number
+  units: null
+- name: beam_depth
+  type: number
+  units: null
+- name: screed_depth
+  type: number
+  units: null
+- name: steel_depth
+  type: number
+  units: null
+- name: swt
+  type: number
+  units: null
+- name: sdl
+  type: number
+  units: null
+- name: ll
+  type: number
+  units: null
+- name: max_span
+  type: number
+  units: null
+- name: concrete_volume
+  type: number
+  units: null
+- name: steel_volume
+  type: number
+  units: null
+- name: timber_volume
+  type: number
+  units: null
+- name: material_concrete_id
+  type: string
+  units: null
+- name: material_steel_id
+  type: string
+  units: null
+- name: material_timber_id
+  type: string
+  units: null
+- name: ebc_mm
+  type: integer
+  units: null
+- name: beam_ref
+  type: string
+  units: null
+- name: source
+  type: string
+  units: null

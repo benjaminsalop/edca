@@ -1,6 +1,6 @@
 ﻿material_id,family,standard_grade,concrete_f_ck,steel_fy,steel_fu,density,unit,ec_a1a3_volumetric,ec_a1a3_mass,ec_a4_ton_km,transport_distance,ec_a5_mass,cost_volume,cost_mass
-concrete,concrete,,40,,,24,metric,330,0.138,0.06,50,0.005,120,0.05
-screed,concrete,,40,,,20,metric,330,0.138,0.06,50,0.005,120,0.05
+concrete,concrete,,40,,,24,metric,300,0.138,0.06,50,0.005,120,0.05
+screed,concrete,,40,,,20,metric,300,0.138,0.06,50,0.005,120,0.05
 pt,steel,,,,,7850,metric,,2,0.06,200,0.02,0.000318471,2.5
 steel,steel,,,50,,7850,metric,,2,0.06,200,0.02,0.000254777,2
 rebar,steel,,,50,,7850,metric,,2,0.06,200,0.02,0.000254777,2

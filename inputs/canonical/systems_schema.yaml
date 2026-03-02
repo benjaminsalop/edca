@@ -54,8 +54,8 @@ columns:
   material_concrete_id:
     type: string
     units: ''
-  material_pt_id:
-    type: string
+  'Unnamed: 18':
+    type: number
     units: ''
   material_steel_id:
     type: string
