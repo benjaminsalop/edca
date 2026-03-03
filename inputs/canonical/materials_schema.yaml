@@ -18,6 +18,12 @@ columns:
   steel_fu:
     type: number
     units: ''
+  timber_fm:
+    type: number
+    units: ''
+  timber_e:
+    type: number
+    units: ''
   density:
     type: number
     units: ''
@@ -36,10 +42,19 @@ columns:
   transport_distance:
     type: number
     units: ''
+  ec_a4_volumetric:
+    type: number
+    units: ''
+  ec_a4_mass:
+    type: number
+    units: ''
+  ec_a5_volumetric:
+    type: number
+    units: ''
   ec_a5_mass:
     type: number
     units: ''
-  cost_volume:
+  cost_volumetric:
     type: number
     units: ''
   cost_mass:

@@ -54,8 +54,11 @@ columns:
   material_concrete_id:
     type: string
     units: ''
-  'Unnamed: 18':
+  material_pt_id:
     type: number
+    units: ''
+  material_rebar_id:
+    type: string
     units: ''
   material_steel_id:
     type: string
@@ -75,10 +78,16 @@ columns:
   steel_volume:
     type: number
     units: ''
+  rebar_volume:
+    type: number
+    units: ''
+  pt_volume:
+    type: number
+    units: ''
   timber_volume:
     type: number
     units: ''
   source:
-    type: number
+    type: string
     units: ''
 notes: Auto-generated basic schema. Please add units & refine types.

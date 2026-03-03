@@ -85,6 +85,8 @@ def regenerate_system_tables(
         "width",
         "material_concrete_id",
         "material_steel_id",
+        "material_rebar_id",
+        "material_pt_id",
         "material_timber_id",
         "source",
     ]
@@ -128,10 +130,13 @@ def regenerate_system_tables(
         "max_span",
         "concrete_volume",
         "steel_volume",
+        "rebar_volume",
+        "pt_volume",
         "timber_volume",
         "material_concrete_id",
         "material_pt_id",
         "material_steel_id",
+        "material_rebar_id",
         "material_timber_id",
         "ebc_mm",
         "beam_ref",
@@ -288,6 +293,8 @@ def validate_relationships(
         for mat_id in [
             getattr(v, "material_concrete_id", None),
             getattr(v, "material_steel_id", None),
+            getattr(v, "material_pt_id", None),
+            getattr(v, "material_rebar_id", None),
             getattr(v, "material_timber_id", None),
         ]:
             if mat_id and mat_id not in materials:
