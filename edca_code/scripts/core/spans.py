@@ -98,11 +98,38 @@ def compute_candidates_for_span(
     depth_enabled: bool = False,
     depth_limit_mm: Optional[float] = None,
     require_separate_checks: bool = False,
-    prefiltered: bool = False) -> pd.DataFrame:
+    prefiltered: bool = False,
+) -> pd.DataFrame:
     """
     If prefiltered=False, filters systems_df for span + loads.
-    If prefiltered=True, assumes systems_df is already filtered (span/loads/unit/depth) and only computes BOM+carbon.
+    If prefiltered=True, assumes systems_df is already filtered (span/loads/unit/depth)
+    and only computes BOM+carbon.
+
+    Adds carbon breakdown columns (all per m²):
+      - carbon_concrete_per_m2
+      - carbon_steel_per_m2              (legacy combined steel bucket, backward-compatible)
+      - carbon_structural_steel_per_m2   (new)
+      - carbon_rebar_per_m2              (new)
+      - carbon_pt_per_m2                 (new)
+      - carbon_timber_per_m2
+      - carbon_screed_per_m2
+      - carbon_by_material_id_json
     """
+
+    def _clean_mat_id(v) -> Optional[str]:
+        """Normalize material IDs from row cells (handle NaN/blank)."""
+        if v is None:
+            return None
+        try:
+            if pd.isna(v):
+                return None
+        except Exception:
+            pass
+        s = str(v).strip()
+        if s == "" or s.lower() == "nan":
+            return None
+        return s
+
     if not prefiltered:
         filtered = systems_mod.filter_systems(
             df=systems_df.copy(),
@@ -121,56 +148,68 @@ def compute_candidates_for_span(
 
     rows = []
     for idx, row in filtered.reset_index(drop=True).iterrows():
+        r = row.copy()  # always define early so except block can use it
         try:
+            # Compute BOM + carbon ONCE (per m²)
             bom_m2 = takeoff_mod.bom_per_m2_from_system_row(row)
-            carbon_res = carbon_mod.compute_assembly_carbon_from_bom(bom_m2, materials_df, include_a4_a5=False)
-            carbon_a1a3 = float(carbon_res.get("totals", {}).get("total_a1a3", 0.0))
-            r = row.copy()
+            carbon_res = carbon_mod.compute_assembly_carbon_from_bom(
+                bom_m2, materials_df, include_a4_a5=False
+            )
 
-
-            bom_m2 = takeoff_mod.bom_per_m2_from_system_row(row)
-            carbon_res = carbon_mod.compute_assembly_carbon_from_bom(bom_m2, materials_df, include_a4_a5=False)
-
-            # keep your existing “default” total (A1-A3)
-            carbon_a1a3 = float(carbon_res.get("totals", {}).get("total_a1a3", 0.0))
-            r = row.copy()
-            r["carbon_total_kgCO2"] = carbon_a1a3
-
-            # NEW: breakdowns (all are per m² because bom_m2 is per m²)
+            totals = carbon_res.get("totals", {}) or {}
             by_cat = carbon_res.get("totals_by_category", {}) or {}
-
-            r["carbon_concrete_per_m2"] = float(by_cat.get("concrete", 0.0))
-            r["carbon_steel_per_m2"]    = float(by_cat.get("steel", 0.0))     # steel_kg + steel_m3 combined
-            r["carbon_timber_per_m2"]   = float(by_cat.get("timber", 0.0))
-            r["carbon_screed_per_m2"]   = float(by_cat.get("screed", 0.0))    # only if you use screed in BOM
-
-            # NEW: per-material-id breakdown (stored compactly)
             by_mat = carbon_res.get("totals_by_material_id", {}) or {}
-            r["carbon_by_material_id_json"] = json.dumps(by_mat, sort_keys=True)
 
-            r["_bom_keys"] = ",".join(sorted(bom_m2.keys()))
+            # Normalize material-id keys to strings for robust lookup
+            by_mat_norm = {str(k): float(v) for k, v in by_mat.items()}
+
+            # Total A1-A3 (per m², since BOM is per m²)
+            carbon_a1a3 = float(totals.get("total_a1a3", 0.0))
+            r["carbon_total_kgCO2"] = carbon_a1a3  # legacy name (actually per m²)
+            r["carbon_total_per_m2"] = carbon_a1a3  # clearer alias
+
+            # Category-level (legacy/backward-compatible)
+            r["carbon_concrete_per_m2"] = float(by_cat.get("concrete", 0.0))
+            r["carbon_steel_per_m2"] = float(by_cat.get("steel", 0.0))  # combined bucket
+            r["carbon_timber_per_m2"] = float(by_cat.get("timber", 0.0))
+            r["carbon_screed_per_m2"] = float(by_cat.get("screed", 0.0))
+
+            # New explicit splits by material ID (robust to category taxonomy changes)
+            steel_id = _clean_mat_id(row.get("material_steel_id"))
+            rebar_id = _clean_mat_id(row.get("material_rebar_id"))
+            pt_id = _clean_mat_id(row.get("material_pt_id"))
+
+            r["carbon_structural_steel_per_m2"] = float(by_mat_norm.get(steel_id, 0.0)) if steel_id else 0.0
+            r["carbon_rebar_per_m2"] = float(by_mat_norm.get(rebar_id, 0.0)) if rebar_id else 0.0
+            r["carbon_pt_per_m2"] = float(by_mat_norm.get(pt_id, 0.0)) if pt_id else 0.0
+
+            # Helpful trace/debug fields
+            r["carbon_by_material_id_json"] = json.dumps(by_mat_norm, sort_keys=True)
+            r["_bom_keys"] = ",".join(sorted(map(str, bom_m2.keys())))
+
             rows.append(r)
+
         except Exception:
             logger.exception(
                 "[takeoff] Error computing BOM/carbon for candidate index %s (span %s). Falling back to NaN.",
                 idx, span_value
             )
-            r = row.copy()
-            r["carbon_total_kgCO2"] = float('nan')
 
-            # NEW: breakdowns (all are per m² because bom_m2 is per m²)
-            by_cat = carbon_res.get("totals_by_category", {}) or {}
+            # Safe fallback row with NaNs / empty traces
+            r["carbon_total_kgCO2"] = float("nan")
+            r["carbon_total_per_m2"] = float("nan")
 
-            r["carbon_concrete_per_m2"] = float('nan')
-            r["carbon_steel_per_m2"]    = float('nan')     # steel_kg + steel_m3 combined
-            r["carbon_timber_per_m2"]   = float('nan')
-            r["carbon_screed_per_m2"]   = float('nan')    # only if you use screed in BOM
+            r["carbon_concrete_per_m2"] = float("nan")
+            r["carbon_steel_per_m2"] = float("nan")
+            r["carbon_structural_steel_per_m2"] = float("nan")
+            r["carbon_rebar_per_m2"] = float("nan")
+            r["carbon_pt_per_m2"] = float("nan")
+            r["carbon_timber_per_m2"] = float("nan")
+            r["carbon_screed_per_m2"] = float("nan")
 
-            # NEW: per-material-id breakdown (stored compactly)
-            by_mat = carbon_res.get("totals_by_material_id", {}) or {}
-            r["carbon_by_material_id_json"] = json.dumps(by_mat, sort_keys=True)
+            r["carbon_by_material_id_json"] = "{}"
+            r["_bom_keys"] = ""
 
-            r["_bom_keys"] = ",".join(sorted(bom_m2.keys()))
             rows.append(r)
 
     return pd.DataFrame(rows).reset_index(drop=True)

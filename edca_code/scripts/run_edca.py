@@ -128,6 +128,64 @@ def select_winners_from_ranked_all(df_ranked_all: pd.DataFrame) -> pd.DataFrame:
          .copy()
     )
 
+def select_lowest_carbon_per_type(df_ranked_all: pd.DataFrame) -> pd.DataFrame:
+    """
+    Select one row per type (fallback typology/system_family), choosing the lowest-carbon row.
+    Prefer passing rows first if a pass column exists.
+    """
+    if df_ranked_all is None or df_ranked_all.empty:
+        return pd.DataFrame()
+
+    d = df_ranked_all.copy()
+
+    # normalize id-ish columns
+    if "system_variant" in d.columns:
+        d["system_variant"] = d["system_variant"].astype(str).str.strip()
+
+    # pick carbon column
+    sort_col = "carbon_total_kgCO2" if "carbon_total_kgCO2" in d.columns else (
+        "carbon_per_m2" if "carbon_per_m2" in d.columns else None
+    )
+    if sort_col is None:
+        return pd.DataFrame()
+
+    d[sort_col] = pd.to_numeric(d[sort_col], errors="coerce")
+    d = d.dropna(subset=[sort_col])
+    if d.empty:
+        return pd.DataFrame()
+
+    # pick grouping column
+    group_col = "type" if "type" in d.columns else (
+        "typology" if "typology" in d.columns else (
+            "system_family" if "system_family" in d.columns else None
+        )
+    )
+    if group_col is None:
+        return d.sort_values(sort_col).head(1).copy()
+
+    # prefer passing if available
+    pass_col = "pass_overall" if "pass_overall" in d.columns else None
+    if pass_col:
+        # robust bool coercion without importing a helper
+        def _to_bool(x):
+            if isinstance(x, bool):
+                return x
+            s = str(x).strip().lower()
+            return s in ("true", "1", "yes", "y", "t")
+        d["_pass_pref"] = d[pass_col].map(_to_bool).fillna(False).astype(int)
+        d = d.sort_values(by=["_pass_pref", sort_col], ascending=[False, True], kind="mergesort")
+    else:
+        d = d.sort_values(sort_col, ascending=True, kind="mergesort")
+
+    out = (
+        d.dropna(subset=[group_col])
+         .groupby(group_col, as_index=False, dropna=False)
+         .head(1)
+         .copy()
+    )
+
+    return out.drop(columns=["_pass_pref"], errors="ignore")
+
 def collapse_summary_ranked_all_by_system_variant(df_in: pd.DataFrame) -> pd.DataFrame:
     """
     Collapse rows so each system_variant appears exactly once.
@@ -759,7 +817,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     try:
         # Build winners using per-case ranked_all outputs (best per category)
         ranked_union = pd.concat(all_ranked_all, ignore_index=True, sort=False) if all_ranked_all else pd.DataFrame()
-        df_winners = select_winners_from_ranked_all(ranked_union)
+        df_winners = select_lowest_carbon_per_type(ranked_union)
 
         if df_winners is not None and not df_winners.empty:
             spans_mod.expand_winners_and_write_materials_per_floor(

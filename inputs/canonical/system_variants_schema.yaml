@@ -1,5 +1,5 @@
 name: system_variants
-description: Auto-generated schema for system_variants on 2026-03-03T14:12:50.429340+00:00Z
+description: Auto-generated schema for system_variants on 2026-03-03T15:48:27.632820+00:00Z
 columns:
 - name: system_variant
   type: string

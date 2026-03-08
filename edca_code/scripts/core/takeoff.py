@@ -28,13 +28,61 @@ def bom_per_m2_from_system_row(system_row: pd.Series) -> Dict[str, float]:
     """
     Compute a basic BOM (per m2) for a single system variant row.
     Returns a dict mapping material_key -> quantity per m2.
+
+    BOM key convention:
+      - volumetric: "<category>:<material_id>"     (e.g., concrete, timber, screed)
+      - mass-based: "<category>_kg:<material_id>"  (e.g., steel_kg, rebar_kg, pt_kg)
+      - volumetric steel-like: "<category>_m3:<material_id>" (fallback if only volume exists)
     """
     bom: Dict[str, float] = {}
 
+    def _clean_mat_id(v: Any, default: str | None = None) -> str | None:
+        if v is None:
+            return default
+        try:
+            if pd.isna(v):
+                return default
+        except Exception:
+            pass
+        s = str(v).strip()
+        if not s or s.lower() == "nan":
+            return default
+        return s
+
+    def _first_positive(cols: List[str]) -> tuple[float, str | None]:
+        """Return (value, source_col) for first positive numeric column found."""
+        for c in cols:
+            if c in system_row.index:
+                v = safe_float(system_row.get(c), 0.0)
+                if v > 0.0:
+                    return float(v), c
+        return 0.0, None
+
+    def _add_steel_like(
+        *,
+        category_base: str,          # "steel" | "rebar" | "pt"
+        material_id_col: str,        # e.g. "material_rebar_id"
+        default_mat_id: str,         # fallback id string if missing
+        mass_cols: List[str],        # preferred
+        vol_cols: List[str],         # fallback
+    ) -> None:
+        mat_id = _clean_mat_id(system_row.get(material_id_col), default=default_mat_id)
+
+        # Prefer mass if present (avoids density assumptions upstream and avoids double-counting)
+        mass_val, _ = _first_positive(mass_cols)
+        if mass_val > 0.0 and mat_id:
+            bom[f"{category_base}_kg:{mat_id}"] = mass_val
+            return
+
+        vol_val, _ = _first_positive(vol_cols)
+        if vol_val > 0.0 and mat_id:
+            bom[f"{category_base}_m3:{mat_id}"] = vol_val
+            return
+
     # --- concrete volume (explicit)
     conc_m3_per_m2 = safe_float(system_row.get("concrete_volume", 0.0))
-    mat_conc = system_row.get("material_concrete_id") or "concrete"
-    if conc_m3_per_m2 and mat_conc:
+    mat_conc = _clean_mat_id(system_row.get("material_concrete_id"), default="concrete")
+    if conc_m3_per_m2 > 0.0 and mat_conc:
         bom[f"concrete:{mat_conc}"] = conc_m3_per_m2
 
     # --- screed / topping: screed_depth may be stored in mm or m
@@ -44,32 +92,75 @@ def bom_per_m2_from_system_row(system_row: pd.Series) -> Dict[str, float]:
     if screed_m > 5:
         screed_m = screed_m / 1000.0
     if screed_m > 0.0:
-        screed_mat = system_row.get("material_pt_id") or "screed"
-        # screed is treated as a concrete/topping volumetric addition (m3/m2)
+        # IMPORTANT: do NOT use PT material for screed
+        screed_mat = (
+            _clean_mat_id(system_row.get("material_screed_id"))
+            or _clean_mat_id(system_row.get("material_topping_id"))
+            or "screed"
+        )
+        # Treat screed as a concrete-like volumetric addition (m3/m2)
         bom[f"concrete:{screed_mat}"] = bom.get(f"concrete:{screed_mat}", 0.0) + screed_m
 
-    # --- steel: try multiple possible columns (volume or mass)
-    # --- steel: prefer mass if present, else volume (avoid double counting)
-    steel_mat = system_row.get("material_steel_id") or "steel"
-
-    steel_mass = (
-        system_row.get("steel_mass_per_m2")
-        or system_row.get("steel_kg_per_m2")
-        or system_row.get("steel_mass")
+    # --- structural steel (legacy "steel")
+    _add_steel_like(
+        category_base="steel",
+        material_id_col="material_steel_id",
+        default_mat_id="steel",
+        mass_cols=[
+            "steel_mass_per_m2",
+            "steel_kg_per_m2",
+            "steel_mass",
+            "steel_kg",
+        ],
+        vol_cols=[
+            "steel_volume",
+            "steel_m3_per_m2",
+            "steel_m3",
+        ],
     )
-    if steel_mass is not None and safe_float(steel_mass, 0.0) > 0.0:
-        bom[f"steel_kg:{steel_mat}"] = safe_float(steel_mass)
-    else:
-        steel_vol = system_row.get("steel_volume") or system_row.get("steel_m3_per_m2")
-        if steel_vol is not None and safe_float(steel_vol, 0.0) > 0.0:
-            bom[f"steel_m3:{steel_mat}"] = safe_float(steel_vol)
+
+    # --- rebar (NEW)
+    _add_steel_like(
+        category_base="rebar",
+        material_id_col="material_rebar_id",
+        default_mat_id="rebar",
+        mass_cols=[
+            "rebar_mass_per_m2",
+            "rebar_kg_per_m2",
+            "rebar_mass",
+            "rebar_kg",
+        ],
+        vol_cols=[
+            "rebar_volume",
+            "rebar_m3_per_m2",
+            "rebar_m3",
+        ],
+    )
+
+    # --- PT steel / tendons (NEW)
+    _add_steel_like(
+        category_base="pt",
+        material_id_col="material_pt_id",
+        default_mat_id="pt",
+        mass_cols=[
+            "pt_mass_per_m2",
+            "pt_kg_per_m2",
+            "pt_mass",
+            "pt_kg",
+        ],
+        vol_cols=[
+            "pt_volume",
+            "pt_m3_per_m2",
+            "pt_m3",
+        ],
+    )
 
     # NOTE: do not include record-only fields (e.g. swt) in BOM; keep BOM strictly material quantities
 
     # --- timber
     timber_m3 = safe_float(system_row.get("timber_volume", 0.0))
-    timber_mat = system_row.get("material_timber_id") or "timber"
-    if timber_m3 and timber_mat:
+    timber_mat = _clean_mat_id(system_row.get("material_timber_id"), default="timber")
+    if timber_m3 > 0.0 and timber_mat:
         bom[f"timber:{timber_mat}"] = timber_m3
 
     return bom

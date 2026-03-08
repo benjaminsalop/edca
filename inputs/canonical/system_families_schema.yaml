@@ -1,5 +1,5 @@
 name: system_families
-description: Auto-generated schema for system_families on 2026-03-03T14:12:50.418488+00:00Z
+description: Auto-generated schema for system_families on 2026-03-03T15:48:27.624602+00:00Z
 columns:
 - name: system_family
   type: string
