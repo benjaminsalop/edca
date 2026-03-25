@@ -43,6 +43,76 @@ from edca_code.scripts.code_checks.code_runner import run_code_checks_if_request
 
 logger = logging.getLogger(__name__)
 
+# -------------------------
+# Debug helpers (drop-in)
+# -------------------------
+import os
+from typing import Iterable
+
+def _dbg_enabled(explicit: bool | None = None) -> bool:
+    """
+    Debug is enabled if:
+      - explicit=True passed by caller, OR
+      - EDCA_DEBUG=1 environment variable, OR
+      - logger level is DEBUG.
+    """
+    if explicit is True:
+        return True
+    if explicit is False:
+        return False
+    if str(os.getenv("EDCA_DEBUG", "")).strip() in {"1", "true", "TRUE", "yes", "YES"}:
+        return True
+    return bool(getattr(logger, "isEnabledFor", lambda *_: False)(logging.DEBUG))
+
+def _dbg_kv(name: str, d: dict, *, explicit: bool | None = None, level: int = logging.DEBUG) -> None:
+    if not _dbg_enabled(explicit):
+        return
+    try:
+        items = ", ".join([f"{k}={d[k]!r}" for k in sorted(d.keys())])
+    except Exception:
+        items = str(d)
+    logger.log(level, "[debug] %s: %s", name, items)
+
+def _dbg_df(
+    name: str,
+    df,
+    *,
+    explicit: bool | None = None,
+    max_rows: int = 15,
+    cols: list[str] | None = None,
+    level: int = logging.DEBUG,
+) -> None:
+    if not _dbg_enabled(explicit):
+        return
+    try:
+        import pandas as pd
+        if df is None:
+            logger.log(level, "[debug] %s: df=None", name)
+            return
+        if not isinstance(df, pd.DataFrame):
+            logger.log(level, "[debug] %s: not a DataFrame (%s)", name, type(df).__name__)
+            return
+        logger.log(level, "[debug] %s: shape=%s", name, df.shape)
+        logger.log(level, "[debug] %s: cols=%s", name, list(df.columns))
+        sub = df
+        if cols:
+            keep = [c for c in cols if c in sub.columns]
+            sub = sub[keep] if keep else sub
+        logger.log(level, "[debug] %s head(%d):\n%s", name, max_rows, sub.head(max_rows).to_string(index=False))
+    except Exception:
+        logger.exception("[debug] Failed dumping df %s", name)
+
+def _dbg_snapshot_df(df: pd.DataFrame, name: str, out_dir: Path, *, enabled: bool, max_rows: int = 25) -> None:
+    if not enabled:
+        return
+    try:
+        ddir = utils_mod.ensure_dir(Path(out_dir) / "debug")
+        fp = ddir / f"{name}.csv"
+        df.to_csv(fp, index=False)
+        logger.debug("[debug] snapshot wrote %s (%s)", fp, df.shape)
+        _dbg_df(f"snapshot::{name}", df, explicit=True, max_rows=max_rows)
+    except Exception:
+        logger.exception("[debug] failed writing snapshot %s", name)
 
 def configure_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
@@ -523,6 +593,12 @@ def main(argv: Optional[List[str]] = None) -> None:
                    help="Cap how many debug rows are logged/attached (default 50).")
     p.add_argument("--verbose", action="store_true", help="Verbose logging")
 
+    # --- NEW debug flags ---
+    p.add_argument("--debug", action="store_true", help="Enable comprehensive debug logging (also EDCA_DEBUG=1).")
+    p.add_argument("--debug-max-rows", type=int, default=25, help="Max rows to print when dumping debug tables.")
+    p.add_argument("--debug-save-snapshots", action="store_true",
+                   help="Write debug snapshots (CSV) into <out>/debug/.")
+
     args = p.parse_args(argv)
     configure_logging(args.verbose)
 
@@ -541,6 +617,21 @@ def main(argv: Optional[List[str]] = None) -> None:
     except Exception:
         logger.debug("[parse] parameters_from_control_file failed; continuing", exc_info=True)
 
+    dbg = bool(getattr(args, "debug", False))
+    dbg_rows = int(getattr(args, "debug_max_rows", 25) or 25)
+    dbg_snap = bool(getattr(args, "debug_save_snapshots", False))
+
+    _dbg_kv("parse.controlfile.highlevel", {
+        "project": getattr(cf, "project_name", None),
+        "unit": getattr(cf, "unit", None),
+        "code_standard": getattr(cf, "code_standard", None),
+        "num_floors": getattr(cf, "num_floors", None),
+        "area_per_floor": getattr(cf, "area_per_floor", None),
+        "depth_limit_enabled": getattr(cf, "depth_limit_enabled", None),
+        "depth_limit": getattr(cf, "depth_limit", None),
+        "spans": getattr(cf, "spans", None),
+    }, explicit=dbg, level=logging.INFO)
+
     # Load systems + materials
     systems_df, _families_df, _variants_df = systems_mod.load_systems_catalog(
         args.systems,
@@ -548,13 +639,28 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
     materials_df = carbon_mod.load_materials_table(args.materials)
 
+    _dbg_df("systems_df.loaded", systems_df, explicit=dbg, max_rows=dbg_rows,
+            cols=["system_variant","system_family","unit","max_span","sdl","sdl_partition","ll","slab_depth","screed_depth"])
+    _dbg_df("materials_df.loaded", materials_df.reset_index(drop=True) if hasattr(materials_df, "reset_index") else materials_df,
+            explicit=dbg, max_rows=dbg_rows)
+    if dbg_snap:
+        _dbg_snapshot_df(systems_df, "systems_df_loaded", out_dir, enabled=True, max_rows=dbg_rows)
+
     # Loads context (auto-finds load_values.yaml / load_combinations.yaml next to occupancies.csv)
     required_loads_global, floors_by_case, loads_df_floor = loads_mod.build_load_context(
         cf,
         args.occupancies,
         load_values_yaml=None,
         load_combinations_yaml=None,
+        debug=dbg,  # NEW: enables unfactored/factored/governing combo debug in loads.py
     )
+
+    _dbg_kv("loads.required_loads_global", required_loads_global, explicit=dbg, level=logging.INFO)
+    _dbg_kv("loads.floors_by_case", {k: v for k, v in floors_by_case.items()}, explicit=dbg, level=logging.INFO)
+    _dbg_df("loads.loads_df_floor", loads_df_floor, explicit=dbg, max_rows=dbg_rows)
+
+    if dbg_snap:
+        _dbg_snapshot_df(loads_df_floor, "loads_df_floor", out_dir, enabled=True, max_rows=dbg_rows)
 
     # Cases from occupancy categories
     loads_df_cases = collapse_floor_loads_to_cases(loads_df_floor, str(getattr(cf, "code_standard", "Default")))
@@ -578,6 +684,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     span_values = spans_mod.resolve_span_values(cf, args, logger=logger)
     logger.info("[span] Evaluating spans: %s", span_values)
 
+    _dbg_kv("span.span_values", {"n": len(span_values), "values": span_values[:50]}, explicit=dbg, level=logging.INFO)
+
     # -------------------------
     # Per-case sweep + rank exports
     # -------------------------
@@ -588,23 +696,38 @@ def main(argv: Optional[List[str]] = None) -> None:
         case_name = str(row.get("load_case", "case"))
         case_out_dir = utils_mod.ensure_dir(out_dir / f"systems_{case_name}")
 
+        use_factored = bool(getattr(cf, "factored_loads", True))
+
         required_loads_case = {
             "max_sdl": float(row.get("raw_sdl", 0.0) or 0.0),
             "max_ll": float(row.get("raw_ll", 0.0) or 0.0),
             "max_total": float((row.get("raw_sdl", 0.0) or 0.0) + (row.get("raw_ll", 0.0) or 0.0)),
         }
 
+        if use_factored:
+            required_loads_case["max_factored_total"] = float(row.get("factored_total", 0.0) or 0.0)
+
+        # Ensure per-case output directory exists
+        case_dir = utils_mod.ensure_dir(Path(out_dir) / f"case_{case_name}")
+
         candidates_case_all = spans_mod.run_span_sweep(
             load_case_name=case_name,
-            out_dir=case_out_dir,
+            out_dir=out_dir,
             systems_df=systems_df,
             materials_df=materials_df,
             span_values=span_values,
             required_loads_case=required_loads_case,
-            cf_unit=str(getattr(cf, "unit", "")) or None,
-            depth_limit_mm=args.depth_limit_mm,
+            cf_unit=cf.unit,
+            depth_limit_mm=getattr(args, "depth_limit_mm", None),
             logger=logger,
+            debug=dbg,
         )
+
+
+        _dbg_df(f"{case_name}.candidates_case_all", candidates_case_all, explicit=dbg, max_rows=dbg_rows,
+        cols=["system_variant","system_family","span","max_span","sdl_total","ll","total_capacity","carbon_total_kgCO2","carbon_per_m2","pass_overall"])
+        if dbg_snap:
+            _dbg_snapshot_df(candidates_case_all, f"{case_name}__candidates_case_all", out_dir, enabled=True, max_rows=dbg_rows)
 
         # -------------------------
         # Save the "evaluated/post-systems" population for Option B

@@ -15,6 +15,65 @@ from edca_code.constants.rebar_properties import RebarSpec, METRIC_REBAR_BY_SPEC
 
 logger = logging.getLogger(__name__)
 
+# -------------------------
+# Debug helpers (drop-in)
+# -------------------------
+import os
+from typing import Iterable
+
+def _dbg_enabled(explicit: bool | None = None) -> bool:
+    """
+    Debug is enabled if:
+      - explicit=True passed by caller, OR
+      - EDCA_DEBUG=1 environment variable, OR
+      - logger level is DEBUG.
+    """
+    if explicit is True:
+        return True
+    if explicit is False:
+        return False
+    if str(os.getenv("EDCA_DEBUG", "")).strip() in {"1", "true", "TRUE", "yes", "YES"}:
+        return True
+    return bool(getattr(logger, "isEnabledFor", lambda *_: False)(logging.DEBUG))
+
+def _dbg_kv(name: str, d: dict, *, explicit: bool | None = None, level: int = logging.DEBUG) -> None:
+    if not _dbg_enabled(explicit):
+        return
+    try:
+        items = ", ".join([f"{k}={d[k]!r}" for k in sorted(d.keys())])
+    except Exception:
+        items = str(d)
+    logger.log(level, "[debug] %s: %s", name, items)
+
+def _dbg_df(
+    name: str,
+    df,
+    *,
+    explicit: bool | None = None,
+    max_rows: int = 15,
+    cols: list[str] | None = None,
+    level: int = logging.DEBUG,
+) -> None:
+    if not _dbg_enabled(explicit):
+        return
+    try:
+        import pandas as pd
+        if df is None:
+            logger.log(level, "[debug] %s: df=None", name)
+            return
+        if not isinstance(df, pd.DataFrame):
+            logger.log(level, "[debug] %s: not a DataFrame (%s)", name, type(df).__name__)
+            return
+        logger.log(level, "[debug] %s: shape=%s", name, df.shape)
+        logger.log(level, "[debug] %s: cols=%s", name, list(df.columns))
+        sub = df
+        if cols:
+            keep = [c for c in cols if c in sub.columns]
+            sub = sub[keep] if keep else sub
+        logger.log(level, "[debug] %s head(%d):\n%s", name, max_rows, sub.head(max_rows).to_string(index=False))
+    except Exception:
+        logger.exception("[debug] Failed dumping df %s", name)
+
 class DesignError(Exception):
     """High-level exception raised when a design step is impossible / invalid."""
     pass
@@ -387,6 +446,17 @@ def flexural_design(ultimate_load_kN_m2: float,
     if z_mm <= 0:
         raise DesignError("Computed lever arm z non-positive.")
 
+    if f_yk_MPa is None or float(f_yk_MPa) <= 0:
+        raise DesignError(f"Invalid steel strength for flexural design: f_yk_MPa={f_yk_MPa}")
+
+    if gamma_s is None or float(gamma_s) <= 0:
+        raise DesignError(f"Invalid gamma_s for flexural design: gamma_s={gamma_s}")
+
+    f_yd_MPa = f_yk_MPa / gamma_s
+
+    if f_yd_MPa <= 0:
+        raise DesignError(f"Invalid design steel strength: f_yd_MPa={f_yd_MPa}")
+
     required_ext_As_mm2_per_m = M_ed_Nmm / (z_mm * f_yd_MPa * 1e3)  # f_yd MPa -> N/mm2 ; multiply by 1e3 to get N/mm2 * mm -> N
 
     selected_spec_ext = choose_rebar_for_As_required(required_ext_As_mm2_per_m, metric_only=True)
@@ -655,14 +725,16 @@ def check_slab_row_preserve_math(row: Dict[str, Any],
         # fallback to synthetic Material dataclass (use canonical units)
         # warn user
         logger.warning("Material CSV path or material_id not provided; using fallback defaults.")
-        mat = Material(material_id=str(material_id or "fallback"),
-                       f_ck_MPa=float(row.get("f_ck_MPa", 30.0)),
-                       f_yk_MPa=float(row.get("f_yk_MPa", 500.0)),
-                       density_kN_m3=float(row.get("density_kN_m3", 25.0)),
-                       gamma_c=float(row.get("gamma_c", LOCAL_DEFAULTS['gamma_c'])),
-                       gamma_s=float(row.get("gamma_s", LOCAL_DEFAULTS['gamma_s'])),
-                       original_units="metric",
-                       raw=row)
+        mat = Material(
+            material_id=str(material_id or "fallback"),
+            f_ck_MPa=float(row.get("concrete_f_ck", 30.0)),
+            f_yk_MPa=float(row.get("steel_fy", 500.0)),
+            density_kN_m3=float(row.get("density", 25.0)),
+            gamma_c=float(row.get("gamma_c", LOCAL_DEFAULTS["gamma_c"])),
+            gamma_s=float(row.get("gamma_s", LOCAL_DEFAULTS["gamma_s"])),
+            original_units=str(row.get("unit", "metric")),
+            raw=row,
+        )
 
     # permanent & variable loads
     G_kN_m2 = permanent_loading(

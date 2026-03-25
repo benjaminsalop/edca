@@ -8,6 +8,65 @@ from edca_code.scripts.core.utils import reorder_output_columns, infer_type
 
 logger = logging.getLogger("rank")
 
+# -------------------------
+# Debug helpers (drop-in)
+# -------------------------
+import os
+from typing import Iterable
+
+def _dbg_enabled(explicit: bool | None = None) -> bool:
+    """
+    Debug is enabled if:
+      - explicit=True passed by caller, OR
+      - EDCA_DEBUG=1 environment variable, OR
+      - logger level is DEBUG.
+    """
+    if explicit is True:
+        return True
+    if explicit is False:
+        return False
+    if str(os.getenv("EDCA_DEBUG", "")).strip() in {"1", "true", "TRUE", "yes", "YES"}:
+        return True
+    return bool(getattr(logger, "isEnabledFor", lambda *_: False)(logging.DEBUG))
+
+def _dbg_kv(name: str, d: dict, *, explicit: bool | None = None, level: int = logging.DEBUG) -> None:
+    if not _dbg_enabled(explicit):
+        return
+    try:
+        items = ", ".join([f"{k}={d[k]!r}" for k in sorted(d.keys())])
+    except Exception:
+        items = str(d)
+    logger.log(level, "[debug] %s: %s", name, items)
+
+def _dbg_df(
+    name: str,
+    df,
+    *,
+    explicit: bool | None = None,
+    max_rows: int = 15,
+    cols: list[str] | None = None,
+    level: int = logging.DEBUG,
+) -> None:
+    if not _dbg_enabled(explicit):
+        return
+    try:
+        import pandas as pd
+        if df is None:
+            logger.log(level, "[debug] %s: df=None", name)
+            return
+        if not isinstance(df, pd.DataFrame):
+            logger.log(level, "[debug] %s: not a DataFrame (%s)", name, type(df).__name__)
+            return
+        logger.log(level, "[debug] %s: shape=%s", name, df.shape)
+        logger.log(level, "[debug] %s: cols=%s", name, list(df.columns))
+        sub = df
+        if cols:
+            keep = [c for c in cols if c in sub.columns]
+            sub = sub[keep] if keep else sub
+        logger.log(level, "[debug] %s head(%d):\n%s", name, max_rows, sub.head(max_rows).to_string(index=False))
+    except Exception:
+        logger.exception("[debug] Failed dumping df %s", name)
+
 def _to_dataframe(maybe_df_or_dict: Union[pd.DataFrame, Dict[int, pd.DataFrame]]) -> pd.DataFrame:
     """
     Accept either a DataFrame or a dict floor->DataFrame and return a single DataFrame.
@@ -208,6 +267,13 @@ def rank_and_export_summary(
 
     # ranked all
     ranked_all = rank_candidates_by_carbon(df_all, carbon_total_col=carbon_col, group_by=None)
+
+    if _dbg_enabled(None):
+        _dbg_kv("rank.ranked_all", {
+            "n_rows": int(len(ranked_all)),
+            "carbon_col": carbon_col,
+            "min_carbon": float(pd.to_numeric(ranked_all[carbon_col], errors="coerce").min()) if carbon_col in ranked_all.columns else None,
+        }, explicit=True, level=logging.INFO)
 
     # lowest overall: first row in ranked_all
     lowest_overall = ranked_all.head(1).reset_index(drop=True)

@@ -7,7 +7,7 @@ columns:
     type: string
     units: ''
   standard_grade:
-    type: number
+    type: string
     units: ''
   concrete_f_ck:
     type: number

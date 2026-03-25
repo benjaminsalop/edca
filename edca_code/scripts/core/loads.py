@@ -7,12 +7,156 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import yaml
+import json
 
 logger = logging.getLogger(__name__)
 
 Number = Union[int, float]
 
+# -------------------------
+# Debug helpers (drop-in)
+# -------------------------
+import os
+from typing import Iterable
 
+def _coerce_optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    try:
+        s = str(value).strip()
+        if s == "":
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+
+def _resolve_partition_load(
+    cf: Any,
+    floor: int,
+    occ_token: str,
+    occ_resolved: str,
+    occ_row: pd.Series,
+    partition_col: Optional[str] = None,
+) -> Tuple[float, str]:
+    """
+    Resolve any partition load that should be added to SDL before factored loads
+    and load combinations are evaluated.
+
+    Priority:
+      1) partition-like column in occupancies.csv for the current occupancy row
+      2) control-file attribute on cf (scalar / per-floor list / dict)
+      3) default to 0.0
+    """
+    if partition_col and partition_col in occ_row.index:
+        v = _coerce_optional_float(occ_row.get(partition_col))
+        if v is not None:
+            return float(v), f"occupancies.csv:{partition_col}"
+
+    candidate_attrs = (
+        "partition_load",
+        "partition_loads",
+        "partition_sdl",
+        "partition_sdls",
+        "partition_dead_load",
+        "partition_dead_loads",
+        "partition_dl",
+        "partition_dls",
+    )
+
+    lookup_keys = (
+        floor,
+        str(floor),
+        occ_resolved,
+        occ_resolved.lower(),
+        occ_token,
+        str(occ_token).lower(),
+        "default",
+        "DEFAULT",
+    )
+
+    for attr in candidate_attrs:
+        if not hasattr(cf, attr):
+            continue
+
+        raw = getattr(cf, attr)
+
+        v = _coerce_optional_float(raw)
+        if v is not None:
+            return float(v), f"cf.{attr}"
+
+        if isinstance(raw, dict):
+            for key in lookup_keys:
+                if key in raw:
+                    v = _coerce_optional_float(raw[key])
+                    if v is not None:
+                        return float(v), f"cf.{attr}[{key!r}]"
+            continue
+
+        if isinstance(raw, (list, tuple)) and 0 <= int(floor) < len(raw):
+            v = _coerce_optional_float(raw[int(floor)])
+            if v is not None:
+                return float(v), f"cf.{attr}[{floor}]"
+
+    return 0.0, "none"
+
+def _dbg_enabled(explicit: bool | None = None) -> bool:
+    """
+    Debug is enabled if:
+      - explicit=True passed by caller, OR
+      - EDCA_DEBUG=1 environment variable, OR
+      - logger level is DEBUG.
+    """
+    if explicit is True:
+        return True
+    if explicit is False:
+        return False
+    if str(os.getenv("EDCA_DEBUG", "")).strip() in {"1", "true", "TRUE", "yes", "YES"}:
+        return True
+    return bool(getattr(logger, "isEnabledFor", lambda *_: False)(logging.DEBUG))
+
+def _dbg_kv(name: str, d: dict, *, explicit: bool | None = None, level: int = logging.DEBUG) -> None:
+    if not _dbg_enabled(explicit):
+        return
+    try:
+        items = ", ".join([f"{k}={d[k]!r}" for k in sorted(d.keys())])
+    except Exception:
+        items = str(d)
+    logger.log(level, "[debug] %s: %s", name, items)
+
+def _dbg_df(
+    name: str,
+    df,
+    *,
+    explicit: bool | None = None,
+    max_rows: int = 15,
+    cols: list[str] | None = None,
+    level: int = logging.DEBUG,
+) -> None:
+    if not _dbg_enabled(explicit):
+        return
+    try:
+        import pandas as pd
+        if df is None:
+            logger.log(level, "[debug] %s: df=None", name)
+            return
+        if not isinstance(df, pd.DataFrame):
+            logger.log(level, "[debug] %s: not a DataFrame (%s)", name, type(df).__name__)
+            return
+        logger.log(level, "[debug] %s: shape=%s", name, df.shape)
+        logger.log(level, "[debug] %s: cols=%s", name, list(df.columns))
+        sub = df
+        if cols:
+            keep = [c for c in cols if c in sub.columns]
+            sub = sub[keep] if keep else sub
+        logger.log(level, "[debug] %s head(%d):\n%s", name, max_rows, sub.head(max_rows).to_string(index=False))
+    except Exception:
+        logger.exception("[debug] Failed dumping df %s", name)
 
 # -------------------------
 # YAML helpers
@@ -297,32 +441,32 @@ def compute_en1990_uls_combos(
     occupancy_key: str,
     load_values: Dict[str, Any],
     load_combos: Dict[str, Any],
+    *,
+    debug: bool | None = None,
 ) -> List[Dict[str, Any]]:
     """
-    Returns list of dicts: {name, total, factors}
+    Returns list of dicts: {name, total, factors, terms}
+    Adds 'terms' for traceability.
     """
     out: List[Dict[str, Any]] = []
     uls = (load_combos.get("EN1990", {}) or {}).get("ULS", {}) or {}
     if not isinstance(uls, dict):
         return out
 
-    # base mapping for your current schema: just G and one Q (LL)
     def load_for_action(action: str) -> float:
         if action in ("G", "G_unf"):
-            return raw_sdl
+            return float(raw_sdl)
         if action == "G_fav":
             return 0.0
         if action == "Q_lead":
-            return raw_ll
+            return float(raw_ll)
         if action == "Q_acc":
-            # IMPORTANT: do NOT double-count LL as both leading+accompanying when LL is the only Q.
             return 0.0
         return 0.0
 
     gamma_g = float(get_by_path(load_values, "EN1990.gamma.ULS.G"))
     gamma_q = float(get_by_path(load_values, "EN1990.gamma.ULS.Q"))
 
-    # psi0 is still useful metadata (and will matter once you add additional variable actions)
     psi0 = None
     try:
         psi0 = float(get_by_path(load_values, f"EN1990.psi.Q.{occupancy_key}.psi0"))
@@ -335,23 +479,38 @@ def compute_en1990_uls_combos(
             continue
 
         total = 0.0
+        terms = []
         for term in expr_list:
             if not isinstance(term, dict):
                 continue
             action = str(term.get("action", "")).strip()
             factor_expr = term.get("factor", 1.0)
             f = eval_factor_expr(factor_expr, load_values, occupancy_key)
-            total += load_for_action(action) * f
+            q = load_for_action(action)
+            total += q * f
+            terms.append({"action": action, "q": q, "factor": f, "contrib": q * f})
 
         out.append({
-            "name": combo_name,
+            "name": str(combo_name),
             "total": float(total),
-            "factors": {
-                "DL": gamma_g,
-                "LL": gamma_q,
-                **({"psi0": psi0} if psi0 is not None else {}),
-            },
+            "factors": {"DL": gamma_g, "LL": gamma_q, **({"psi0": psi0} if psi0 is not None else {})},
+            "terms": terms,
         })
+
+    if _dbg_enabled(debug):
+        # show a compact ranking + governing combo
+        ranked = sorted(out, key=lambda d: float(d.get("total", 0.0)), reverse=True)
+        gov = ranked[0] if ranked else None
+        _dbg_kv("loads.EN1990.uls.summary", {
+            "occupancy_key": occupancy_key,
+            "raw_sdl": float(raw_sdl),
+            "raw_ll": float(raw_ll),
+            "n_combos": len(out),
+            "governing": (gov.get("name") if gov else None),
+            "governing_total": (gov.get("total") if gov else None),
+        }, explicit=True, level=logging.INFO)
+        if gov:
+            logger.debug("[debug] loads.EN1990.governing.terms=%s", gov.get("terms"))
 
     return out
 
@@ -360,6 +519,8 @@ def compute_asce7_lrfd_combos(
     raw_sdl: float,
     raw_ll: float,
     load_combos: Dict[str, Any],
+    *,
+    debug: bool | None = None,
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     lrfd = ((load_combos.get("ASCE7", {}) or {}).get("LRFD", {}) or {})
@@ -367,11 +528,10 @@ def compute_asce7_lrfd_combos(
         return out
 
     def load_for_action(action: str) -> float:
-        # minimal mapping for now
         if action == "D":
-            return raw_sdl
+            return float(raw_sdl)
         if action == "L":
-            return raw_ll
+            return float(raw_ll)
         return 0.0
 
     for name, spec in lrfd.items():
@@ -389,21 +549,37 @@ def compute_asce7_lrfd_combos(
                 continue
             total = 0.0
             factors: Dict[str, float] = {}
+            terms = []
             for term in expr_list:
                 if not isinstance(term, dict):
                     continue
                 action = str(term.get("action", "")).strip()
                 f = float(term.get("factor", 1.0))
-                total += load_for_action(action) * f
+                q = load_for_action(action)
+                total += q * f
                 if action in ("D", "L"):
                     factors[action] = f
+                terms.append({"action": action, "q": q, "factor": f, "contrib": q * f})
 
             if best_total is None or total > best_total:
                 best_total = float(total)
-                best = {"name": name, "total": float(total), "factors": factors}
+                best = {"name": str(name), "total": float(total), "factors": factors, "terms": terms}
 
         if best is not None:
             out.append(best)
+
+    if _dbg_enabled(debug):
+        ranked = sorted(out, key=lambda d: float(d.get("total", 0.0)), reverse=True)
+        gov = ranked[0] if ranked else None
+        _dbg_kv("loads.ASCE7.lrfd.summary", {
+            "raw_sdl": float(raw_sdl),
+            "raw_ll": float(raw_ll),
+            "n_combos": len(out),
+            "governing": (gov.get("name") if gov else None),
+            "governing_total": (gov.get("total") if gov else None),
+        }, explicit=True, level=logging.INFO)
+        if gov:
+            logger.debug("[debug] loads.ASCE7.governing.terms=%s", gov.get("terms"))
 
     return out
 
@@ -487,6 +663,8 @@ def build_load_context(
     occupancies_csv: Union[str, Path],
     load_values_yaml: Optional[Union[str, Path]] = None,
     load_combinations_yaml: Optional[Union[str, Path]] = None,
+    *,
+    debug: bool = False,
 ) -> Tuple[Dict[str, float], Dict[str, List[int]], pd.DataFrame]:
     """
     Returns:
@@ -504,6 +682,8 @@ def build_load_context(
 
     load_values = inject_aliases(read_yaml(load_values_yaml))
     load_combos = read_yaml(load_combinations_yaml)
+
+    use_factored_loads = bool(getattr(cf, "factored_loads", True))
 
     occ_df = pd.read_csv(occ_path)
 
@@ -530,9 +710,23 @@ def build_load_context(
     # Optional: explicit psi key column (otherwise infer as f'{occupancy}_EC')
     psi_col = pick_col(["psi_key", "eurocode_key", "ec_key"])
 
+    # Optional: partition load column to be added to SDL before factored loads
+    # and governing combinations are evaluated.
+    partition_col = pick_col([
+        "sdl_partition",
+        "partition_load",
+        "partition_sdl",
+        "partition_dead_load",
+        "partition_dl",
+        "partitions",
+        "moveable_partitions",
+    ])
+
     occ_df[occ_col] = occ_df[occ_col].astype(str).str.strip()
     occ_df[sdl_col] = pd.to_numeric(occ_df[sdl_col], errors="coerce").fillna(0.0)
     occ_df[ll_col]  = pd.to_numeric(occ_df[ll_col], errors="coerce").fillna(0.0)
+    if partition_col is not None:
+        occ_df[partition_col] = pd.to_numeric(occ_df[partition_col], errors="coerce").fillna(0.0)
 
     occ_lookup = {r[occ_col]: r for _, r in occ_df.iterrows()}
 
@@ -562,6 +756,12 @@ def build_load_context(
     max_raw_ll = 0.0
     max_factored_sdl = 0.0
     max_factored_ll = 0.0
+    max_governing_factored_total = 0.0
+    max_design_sdl = 0.0
+    max_design_ll = 0.0
+    max_design_total = 0.0
+    max_characteristic_total = 0.0
+    
 
     for f in range(int(num_floors)):
         occ_token = floor_to_occ.get(f, program_default)
@@ -579,8 +779,26 @@ def build_load_context(
         r = occ_lookup[resolved_key]
         occ = resolved_key
 
-        raw_sdl = float(r[sdl_col])
+        base_sdl = float(r[sdl_col])
+        partition_sdl, partition_source = _resolve_partition_load(
+            cf,
+            f,
+            str(occ_token),
+            str(occ),
+            r,
+            partition_col=partition_col,
+        )
+        raw_sdl = float(base_sdl + partition_sdl)
         raw_ll = float(r[ll_col])
+
+        if partition_sdl:
+            logger.info(
+                "[loads] Added partition load %.3f to SDL for floor %s (%s via %s)",
+                partition_sdl,
+                f,
+                occ,
+                partition_source,
+            )
 
         floors_by_case.setdefault(str(occ), []).append(int(f))
 
@@ -596,51 +814,92 @@ def build_load_context(
             logger.info(f"[loads] psi key resolved for '{occ}': {psi_key} ({psi_strategy})")
 
         if use_euro:
-            combos = compute_en1990_uls_combos(raw_sdl, raw_ll, psi_key, load_values, load_combos)
+            combos = compute_en1990_uls_combos(raw_sdl, raw_ll, psi_key, load_values, load_combos, debug=debug)
             gamma_g = float(get_by_path(load_values, "EN1990.gamma.ULS.G"))
             gamma_q = float(get_by_path(load_values, "EN1990.gamma.ULS.Q"))
         else:
-            combos = compute_asce7_lrfd_combos(raw_sdl, raw_ll, load_combos)
+            combos = compute_asce7_lrfd_combos(raw_sdl, raw_ll, load_combos, debug=debug)
             # For ASCE, gamma values are combo-dependent; leave None here
             gamma_g = None
             gamma_q = None
-
-        best = max(combos, key=lambda x: float(x.get("total", 0.0))) if combos else None
-        best_total = float(best["total"]) if best else float(raw_sdl + raw_ll)
 
         # Maintain your legacy outputs
         factored_sdl = (gamma_g * raw_sdl) if gamma_g is not None else raw_sdl
         factored_ll  = (gamma_q * raw_ll)  if gamma_q is not None else raw_ll
 
+        characteristic_sdl = float(raw_sdl)
+        characteristic_ll = float(raw_ll)
+        characteristic_total = float(raw_sdl + raw_ll)
+
+        design_sdl = float(factored_sdl) if use_factored_loads else characteristic_sdl
+        design_ll = float(factored_ll) if use_factored_loads else characteristic_ll
+        design_total = float(best_total) if use_factored_loads else characteristic_total
+
+        # NEW: governing trace details
+        best = max(combos, key=lambda x: float(x.get("total", 0.0))) if combos else None
+        best_total = float(best["total"]) if best else float(raw_sdl + raw_ll)
+        best_name = (best.get("name") if isinstance(best, dict) else None)
+        best_terms = (best.get("terms") if isinstance(best, dict) else None)
+
         rows.append({
             "floor": int(f),
             "occupancy": str(occ),
-            "SDL": raw_sdl,
-            "LL": raw_ll,
-            combo_col: combos,
+            "base_sdl": float(base_sdl),
+            "partition_sdl": float(partition_sdl),
+
+            "SDL": characteristic_sdl,
+            "LL": characteristic_ll,
+
+            "characteristic_sdl": characteristic_sdl,
+            "characteristic_ll": characteristic_ll,
+            "characteristic_total": characteristic_total,
+
             "factored_sdl": float(factored_sdl),
             "factored_ll": float(factored_ll),
             "factored_total": float(best_total),
-            "combo": (best.get("name") if best else None),
+
+            "design_sdl": design_sdl,
+            "design_ll": design_ll,
+            "design_total": design_total,
+            "loads_mode": "factored" if use_factored_loads else "characteristic",
+
+            combo_col: combos,
+            "combo": best_name,
+            "combo_terms": json.dumps(best_terms, default=str) if best_terms is not None else None,
             "gamma_g": gamma_g,
             "gamma_q": gamma_q,
             "unit": str(getattr(cf, "unit", "metric")).strip().lower(),
         })
 
-        max_raw_sdl = max(max_raw_sdl, raw_sdl)
-        max_raw_ll = max(max_raw_ll, raw_ll)
+        max_raw_sdl = max(max_raw_sdl, characteristic_sdl)
+        max_raw_ll = max(max_raw_ll, characteristic_ll)
+
         max_factored_sdl = max(max_factored_sdl, float(factored_sdl))
         max_factored_ll = max(max_factored_ll, float(factored_ll))
+        max_governing_factored_total = max(max_governing_factored_total, float(best_total))
+
+        max_design_sdl = max(max_design_sdl, design_sdl)
+        max_design_ll = max(max_design_ll, design_ll)
+        max_design_total = max(max_design_total, design_total)
+
+        max_characteristic_total = max(max_characteristic_total, characteristic_total)
 
     loads_df_floor = pd.DataFrame(rows)
 
     required_loads = {
-        "max_sdl": float(max_raw_sdl),
-        "max_ll": float(max_raw_ll),
-        "max_total": float(max_raw_sdl + max_raw_ll),
+        "max_sdl": float(max_design_sdl),
+        "max_ll": float(max_design_ll),
+        "max_total": float(max_design_total),
+
+        "max_characteristic_sdl": float(max_raw_sdl),
+        "max_characteristic_ll": float(max_raw_ll),
+        "max_characteristic_total": float(max_characteristic_total),
+
         "max_factored_sdl": float(max_factored_sdl),
         "max_factored_ll": float(max_factored_ll),
-        "max_factored_total": float(max_factored_sdl + max_factored_ll),
+        "max_factored_total": float(max_governing_factored_total),
+
+        "loads_mode": "factored" if use_factored_loads else "characteristic",
     }
 
     return required_loads, floors_by_case, loads_df_floor

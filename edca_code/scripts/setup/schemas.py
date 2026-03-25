@@ -129,6 +129,7 @@ class SystemFamily(BaseModel):
     unit: Optional[str] = None
     width: Optional[float] = None
     material_concrete_id: Optional[str] = None
+    material_screed_id: Optional[str] = None
     material_pt_id: Optional[str] = None
     material_steel_id: Optional[str] = None
     material_rebar_id: Optional[str] = None
@@ -151,11 +152,13 @@ class SystemVariant(BaseModel):
     ll: Optional[float] = None
     max_span: Optional[float] = None
     concrete_volume: Optional[float] = None   # m3 per m2 (or per unit area) — document units in schema yaml
+    screed_volume: Optional[float] = None
     steel_volume: Optional[float] = None
     rebar_volume: Optional[float] = None
     pt_volume: Optional[float] = None
     timber_volume: Optional[float] = None
     material_concrete_id: Optional[str] = None
+    material_screed_id: Optional[str] = None
     material_pt_id: Optional[str] = None
     material_rebar_id: Optional[str] = None
     material_steel_id: Optional[str] = None
@@ -168,7 +171,7 @@ class SystemVariant(BaseModel):
     # numeric coercion + non-negative checks
     @validator(
         "slab_depth", "beam_depth", "screed_depth", "steel_depth",
-        "swt", "sdl", "ll", "max_span", "concrete_volume", "steel_volume", "rebar_volume", "pt_volume", "timber_volume",
+        "swt", "sdl", "ll", "max_span", "concrete_volume", "screed_volume", "steel_volume", "rebar_volume", "pt_volume", "timber_volume",
         pre=True
     )
     def coerce_to_float_or_none(cls, v):
@@ -224,6 +227,13 @@ class SystemVariant(BaseModel):
             if mat and mat.density is not None and mat.ec_a1a3_mass is not None:
                 rebar_mass = float(self.rebar_volume) * float(mat.density)
                 total += rebar_mass * float(mat.ec_a1a3_mass)
+                any_known = True
+        # screed
+        if self.screed_volume is not None:
+            mat = material_lookup.get(self.material_screed_id)
+            if mat and mat.density is not None and mat.ec_a1a3_mass is not None:
+                screed_mass = float(self.screed_volume) * float(mat.density)
+                total += screed_mass * float(mat.ec_a1a3_mass)
                 any_known = True
         # pt steel
         if self.pt_volume is not None and self.material_pt_id is not None:

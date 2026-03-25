@@ -1,5 +1,5 @@
 name: system_families
-description: Auto-generated schema for system_families on 2026-03-03T15:48:27.624602+00:00Z
+description: Auto-generated schema for system_families on 2026-03-12T10:47:54.564169+00:00Z
 columns:
 - name: system_family
   type: string
@@ -26,6 +26,9 @@ columns:
   type: number
   units: null
 - name: material_concrete_id
+  type: string
+  units: null
+- name: material_screed_id
   type: string
   units: null
 - name: material_steel_id

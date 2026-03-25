@@ -54,8 +54,11 @@ columns:
   material_concrete_id:
     type: string
     units: ''
+  material_screed_id:
+    type: string
+    units: ''
   material_pt_id:
-    type: number
+    type: string
     units: ''
   material_rebar_id:
     type: string
@@ -73,6 +76,9 @@ columns:
     type: string
     units: ''
   concrete_volume:
+    type: number
+    units: ''
+  screed_volume:
     type: number
     units: ''
   steel_volume:
