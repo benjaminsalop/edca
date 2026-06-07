@@ -1,0 +1,93 @@
+#╔══════════════════════════════════════════════════════════════════════════════╗
+#║  EARLYSTRUCT CONTROL FILE                                                    ║
+#║  last modified: 2026-01-19.                                                  ║
+#║                                                                              ║
+#║  Instructions: Replace the commented sample inputs with your own values.     ║
+#║                Do not change the keywords or anything inside the boxes.      ║
+#║                Fields marked (optional) may be left blank.                   ║
+#║                                                                              ║
+#║  Key Notes: CLI/Notebook SPANS overrides SPANS below. By default this file   ║
+#║             overrides CSVs unless USE_CSV is set to Y.                       ║
+#╚══════════════════════════════════════════════════════════════════════════════╝
+
+#╓──────────────────╖
+#║  MODE / SOURCES  ║
+#╙──────────────────╜
+USE_CSV: false                                            # (optional); true | false; if true, program.csv is used and all entries below ignored
+DATA_DIR: "inputs"                                        # Path to directory containing CSV files
+
+#╓────────────────╖
+#║  PROJECT DATA  ║
+#╙────────────────╜
+
+PROJECT_NAME: UCSB San Benito Building 1                  # 
+LOCATION: "Santa Barbara, CA"                             # 
+UNIT:   imperial                                            # metric | imperial
+FLOOR_PLATE:
+  mode: dims                                              # dims | area
+  area_per_floor:                                         # m^2 if metric, ft^2 if imperial; ignored if plate dimensions provided below
+  length: 104.75                                          # (optional); m or ft (blank => square plate)       
+  width: 108.0                                            # (optional); m or ft (blank => square plate)     
+FLOOR_TO_FLOOR_HEIGHT: 19.125                             # m or ft
+NUM_FLOORS: 3                                             # total number of floorplates in building (including roof)
+IDEAL_COLUMN_SPACING:                                     # (optional);m or ft (used only if no SPANS information below) 
+DEPTH_LIMIT_ENABLED: false                                # (optional); true|false, assumed to be false if blank
+DEPTH_LIMIT:                                              # (optional); numeric; m or ft based on UNIT
+FIRE_RESISTANCE_PERIOD: 60                                # (optional); fire resistance period in minutes (30|60|90|120|180|240); default 60
+NOTES:                                                    # (optional); Structural floors only; depth limit disabled.
+
+#╓─────────╖
+#║  SPANS  ║
+#╙─────────╜
+
+SPANS:                                                    # Defining the range of spans to consider
+  mode: list                                              # list | range
+  range: [13.42]                                           # (if mode=range) min and max span values
+  sweep: false                                            # (if mode=range) true|false; if true, we sweep through span values in 1m or 1ft increments
+  step: 1.0                                               # (optional); interpreted in UNIT (ft if imperial, m if metric)
+  edge_cantilever_max: 6.5                                # (optional); max edge cantilever (m or ft)       
+
+# One way slab irregularity — (optional) – if omitted we just align major span with the longer plate dimension:
+ONE_WAY_IRREGULAR: false
+ONE_WAY_SLAB_MIN_SPAN:                                    # If blank, defaults to SPANS min value or IDEAL_COLUMN_SPACING
+ONE_WAY_BEAM_MIN_SPAN:                                    # If blank, defaults to SPANS min value or IDEAL_COLUMN_SPACING
+ONE_WAY_ORIENTATION: LENGTHWISE                           # LENGTHWISE | WIDTHWISE
+
+COLUMNS_BY_FLOOR: true                                    # (optional); true|false; if true, columns are calculated separately for each floor based on the spans and floor plate dimensions; if false, columns are calculated based on the average axial load across the building and the longest span
+MOMENT_FRAME_COLUMNS: false                               # (optional); true sizes columns for gravity-frame beam end moments; false treats columns as braced/gravity columns with axial + eccentricity checks
+STEEL_BEAM_SLS_CHECKS: true                               # (optional); true applies a steel beam span/depth serviceability screen in addition to strength checks
+STEEL_BEAM_MAX_SPAN_DEPTH_RATIO: 16                       # (optional); smaller is more conservative for primary steel beam stiffness/depth
+STEEL_SECONDARY_BEAM_MAX_SPAN_DEPTH_RATIO: 12             # (optional); smaller is more conservative for secondary steel beam stiffness/depth
+STEEL_PRIMARY_BEAM_MOMENT_CAPACITY_FACTOR: 1.0            # (optional); primary beams usually have floor restraint/continuity unless explicitly disabled
+STEEL_SECONDARY_BEAM_MOMENT_CAPACITY_FACTOR: 0.75         # (optional); secondary floor beams use reduced capacity unless restraint/composite action is explicit
+STEEL_BEAM_INCLUDE_SELF_WEIGHT: true                      # (optional); include factored steel beam self-weight in primary/secondary beam checks
+RC_BEAM_SPAN_DEPTH_CHECKS: true                           # (optional); true applies a practical RC beam span/depth screen alongside EC2 strength checks
+RC_BEAM_MAX_SPAN_DEPTH_RATIO: 12                          # (optional); smaller is more conservative for primary RC beam depth
+RC_SECONDARY_BEAM_MAX_SPAN_DEPTH_RATIO: 12                # (optional); smaller is more conservative for secondary RC beam depth
+FIRE_RESISTANCE_MINIMA: true                              # (optional); true applies fire-resistance thickness minima using FIRE_RESISTANCE_PERIOD
+
+#╓───────────╖
+#║  PROGRAM  ║
+#╙───────────╜
+
+#These define which floors use which occupancy (from occupancies.csv).
+#If any PROGRAM entries are present (and USE_CSV != Y), program.csv is ignored.
+#Use any of the formats below (you may mix and match). If a PROGRAM line exists,
+#it takes precedence over PROGRAM_1/2/3 lines.
+
+FACTORED_LOADS: false   # true = export ULS/LRFD loads downstream; false = export characteristic loads
+
+# The program can be defined in any of the following ways:
+PROGRAM:                                                  # (optional) — dict mapping floor ranges to occupancy types. Floors not specified default to "office".
+  - floors: [0, 3] # interpreted as floor 0 inclusive
+    occupancy: residential
+
+PROGRAM_DEFAULT: residential
+
+#╓─────────────╖
+#║  REPORTING  ║
+#╙─────────────╜
+
+#   PER_SYSTEM -> one row per system_id (selected best variant)  [default]
+#   PER_ROW    -> one row per catalog row (every variant)
+RESULTS_SCOPE: PER_SYSTEM

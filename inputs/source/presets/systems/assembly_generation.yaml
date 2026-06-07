@@ -1,0 +1,130 @@
+meta:
+  dataset: assembly_generation
+  version: 0.2
+  description: >-
+    Rules for generating candidate structural assemblies from the component
+    catalogs and compatibility YAML. This file defines generation order,
+    null handling, load path templates, pruning, and scoring penalties.
+
+generation:
+  id_format: "{floor_system_id}__{primary_beam_system_id}__{secondary_beam_system_id}__{column_system_id}__{lateral_system_id}"
+
+  steps:
+    - name: filter_floor_candidates
+      description: "Filter floor variants by occupancy, load, span, code basis, and typology constraints."
+
+    - name: assign_primary_beam_candidates
+      description: "Select primary beams allowed by floor family compatibility and typology filters."
+
+    - name: assign_secondary_beam_candidates
+      description: "Select secondary beams when required by floor family or framing logic."
+
+    - name: assign_column_candidates
+      description: "Select columns compatible with floor and beam choices and storey count."
+
+    - name: assign_lateral_candidates
+      description: "Select lateral systems compatible with material family mix and typology."
+
+    - name: apply_hard_compatibility_rules
+      description: "Remove combinations disallowed by system_compatibility."
+
+    - name: apply_typology_preferences
+      description: "Adjust ranking using typology and preference rules."
+
+    - name: prune_duplicates
+      description: "Remove redundant family-identical combinations if enabled."
+
+defaults:
+  framing_logic:
+    beamless_systems_have_null_primary_beam: true
+    beamless_systems_have_null_secondary_beam: true
+    no_secondary_beams_if_not_required: true
+
+  quantity_methods:
+    floor: per_m2
+    primary_beam: per_m
+    secondary_beam: per_m
+    column: per_m
+    lateral: per_m2_gifa
+
+  load_path_methods:
+    beamless:
+      floor_to_secondary_beam: false
+      secondary_to_primary_beam: false
+      beam_to_column: false
+      floor_to_column_direct: true
+      floor_to_wall_direct: false
+
+    one_way_with_primary_only:
+      floor_to_secondary_beam: false
+      secondary_to_primary_beam: false
+      beam_to_column: true
+      floor_to_column_direct: false
+      floor_to_wall_direct: false
+
+    two_way_with_secondary_and_primary:
+      floor_to_secondary_beam: true
+      secondary_to_primary_beam: true
+      beam_to_column: true
+      floor_to_column_direct: false
+      floor_to_wall_direct: false
+
+pruning:
+  max_candidates_per_floor_variant: 50
+  max_candidates_per_typology: 500
+  deduplicate_on_family_ids: true
+  remove_soft_discouraged_only_if_candidate_count_exceeds: 200
+
+rules:
+  - name: beamless_floor_generation
+    when:
+      floor_flags:
+        can_beamless: true
+        requires_primary_beams: false
+        requires_secondary_beams: false
+    generate:
+      primary_beam_system_id: null
+      secondary_beam_system_id: null
+      load_path_method: beamless
+
+  - name: primary_only_generation
+    when:
+      floor_flags:
+        requires_primary_beams: true
+        requires_secondary_beams: false
+    generate:
+      secondary_beam_system_id: null
+      load_path_method: one_way_with_primary_only
+
+  - name: primary_and_secondary_generation
+    when:
+      floor_flags:
+        requires_primary_beams: true
+        requires_secondary_beams: true
+    generate:
+      load_path_method: two_way_with_secondary_and_primary
+
+ranking_penalties:
+  soft_discouraged_pairing: 25
+  non_default_material_mix: 10
+  non_preferred_lateral_system: 8
+  complex_load_path: 5
+
+material_mix_labels:
+  concrete_only:
+    floor_material_family: concrete
+    primary_beam_material_family: concrete
+    column_material_family: concrete
+
+  steel_only:
+    floor_material_family: steel
+    primary_beam_material_family: steel
+    column_material_family: steel
+
+  timber_only:
+    floor_material_family: timber
+    primary_beam_material_family: timber
+    column_material_family: timber
+
+  hybrid:
+    description: "Any material mix not captured by the pure-family labels above."

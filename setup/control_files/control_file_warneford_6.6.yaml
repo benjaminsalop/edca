@@ -1,0 +1,52 @@
+#╔══════════════════════════════════════════════════════════════════════════════╗
+#║  EARLYSTRUCT CONTROL FILE — Warneford Project Sample (6.6 m spans)           ║
+#╚══════════════════════════════════════════════════════════════════════════════╝
+
+USE_CSV: false
+DATA_DIR: "inputs"
+
+PROJECT_NAME: "Warneford Project Sample"
+LOCATION: "1 Main St, Oxford"
+REGION: UK
+UNIT: metric
+CODE_STANDARD: Eurocode
+TYPOLOGY_ID:
+FLOOR_PLATE:
+  mode: area
+  area_per_floor: 5690
+FLOOR_TO_FLOOR_HEIGHT: 4.0
+NUM_FLOORS: 4
+DEPTH_LIMIT_ENABLED: false
+NOTES: "Warneford reference case; 4 storeys; 5690 m²/floor; symmetric 6.6 m bay; Assembly_EC + Laboratory_EC occupancies."
+
+SPANS:
+  mode: list
+  range: [6.6]
+  sweep: false
+  step: 0.5
+  edge_cantilever_max: 0
+
+ONE_WAY_IRREGULAR: true
+ONE_WAY_SLAB_MIN_SPAN: 6.6
+ONE_WAY_BEAM_MIN_SPAN: 6.6
+ONE_WAY_ORIENTATION: LENGTHWISE
+
+FACTORED_LOADS: false
+
+LOAD_BASIS_BY_CATEGORY:
+  cast_in_place: factored
+  composite:     factored
+  pt:            factored
+  precast:       unfactored
+  timber:        unfactored
+  other:         factored
+
+PROGRAM:
+  - floors: [0, 1]
+    occupancy: Assembly_EC
+  - floors: [2, 3]
+    occupancy: Laboratory_EC
+
+PROGRAM_DEFAULT: Assembly_EC
+
+RESULTS_SCOPE: PER_SYSTEM

@@ -1,0 +1,198 @@
+meta:
+  dataset: system_compatibility
+  version: 0.2
+  description: >-
+    Compatibility rules controlling which floor, beam, column, and lateral
+    families can be combined. Hard exclusions should remove candidates.
+    Discouraged combinations should remain possible but receive penalties.
+
+families:
+  floor:
+    hollowcore:
+      defaults:
+        requires_primary_beams: true
+        requires_secondary_beams: true
+        can_beamless: false
+        can_span_to_columns_directly: false
+        can_span_to_walls: true
+      compatible_with:
+        primary_beam_families: [rc_downstand_beam, steel_ub_composite, precast_rc_beam]
+        secondary_beam_families: [steel_secondary_beam, precast_rc_beam]
+        column_families: [rc_rectangular_column, steel_uc_column, precast_rc_column]
+        lateral_families: [rc_core, rc_shear_wall, steel_braced_frame]
+      disallow:
+        column_families: [glulam_column, timber_post]
+
+    double_tee:
+      defaults:
+        requires_primary_beams: true
+        requires_secondary_beams: false
+        can_beamless: false
+        can_span_to_columns_directly: false
+        can_span_to_walls: true
+      compatible_with:
+        primary_beam_families: [precast_rc_beam, rc_downstand_beam, steel_ub_composite]
+        secondary_beam_families: []
+        column_families: [rc_rectangular_column, steel_uc_column, precast_rc_column]
+        lateral_families: [rc_core, steel_braced_frame]
+      disallow:
+        column_families: [glulam_column, timber_post]
+
+    flat_slab:
+      defaults:
+        requires_primary_beams: false
+        requires_secondary_beams: false
+        can_beamless: true
+        can_span_to_columns_directly: true
+        can_span_to_walls: true
+      compatible_with:
+        primary_beam_families: [rc_downstand_beam]
+        secondary_beam_families: []
+        column_families: [rc_rectangular_column, steel_uc_column]
+        lateral_families: [rc_core, rc_shear_wall, steel_braced_frame]
+
+    pt_slab:
+      defaults:
+        requires_primary_beams: false
+        requires_secondary_beams: false
+        can_beamless: true
+        can_span_to_columns_directly: true
+        can_span_to_walls: true
+      compatible_with:
+        primary_beam_families: [rc_downstand_beam, steel_ub_composite]
+        secondary_beam_families: []
+        column_families: [rc_rectangular_column, steel_uc_column]
+        lateral_families: [rc_core, rc_shear_wall, steel_braced_frame]
+      discourage:
+        primary_beam_families: [precast_rc_beam]
+
+    composite_deck:
+      defaults:
+        requires_primary_beams: true
+        requires_secondary_beams: true
+        can_beamless: false
+        can_span_to_columns_directly: false
+        can_span_to_walls: false
+      compatible_with:
+        primary_beam_families: [steel_ub_composite, steel_cellular_beam, rc_downstand_beam]
+        secondary_beam_families: [steel_secondary_beam, steel_ub_composite]
+        column_families: [steel_uc_column, rc_rectangular_column]
+        lateral_families: [steel_braced_frame, steel_moment_frame, rc_core]
+
+    clt_floor:
+      defaults:
+        requires_primary_beams: true
+        requires_secondary_beams: true
+        can_beamless: false
+        can_span_to_columns_directly: false
+        can_span_to_walls: true
+      compatible_with:
+        primary_beam_families: [glulam_beam, steel_ub_composite, rc_downstand_beam]
+        secondary_beam_families: [glulam_beam, steel_secondary_beam]
+        column_families: [glulam_column, steel_uc_column, rc_rectangular_column]
+        lateral_families: [timber_core, steel_braced_frame, rc_core]
+      discourage:
+        column_families: [rc_rectangular_column]
+
+  beam:
+    rc_downstand_beam:
+      properties:
+        can_be_primary: true
+        can_be_secondary: true
+        can_be_edge_beam: true
+      compatible_with:
+        floor_families: [flat_slab, pt_slab, hollowcore, double_tee, composite_deck, beam_slab]
+        column_families: [rc_rectangular_column, steel_uc_column, precast_rc_column]
+
+    precast_rc_beam:
+      properties:
+        can_be_primary: true
+        can_be_secondary: false
+        can_be_edge_beam: true
+      compatible_with:
+        floor_families: [hollowcore, double_tee]
+        column_families: [precast_rc_column, rc_rectangular_column, steel_uc_column]
+
+    steel_ub_composite:
+      properties:
+        can_be_primary: true
+        can_be_secondary: true
+        can_be_edge_beam: true
+      compatible_with:
+        floor_families: [composite_deck, hollowcore, clt_floor, double_tee, pt_slab]
+        column_families: [steel_uc_column, rc_rectangular_column]
+
+    steel_secondary_beam:
+      properties:
+        can_be_primary: false
+        can_be_secondary: true
+        can_be_edge_beam: false
+      compatible_with:
+        floor_families: [composite_deck, clt_floor, hollowcore]
+        column_families: [steel_uc_column, rc_rectangular_column]
+
+    steel_cellular_beam:
+      properties:
+        can_be_primary: true
+        can_be_secondary: false
+        can_be_edge_beam: true
+      compatible_with:
+        floor_families: [composite_deck]
+        column_families: [steel_uc_column, rc_rectangular_column]
+
+    glulam_beam:
+      properties:
+        can_be_primary: true
+        can_be_secondary: true
+        can_be_edge_beam: true
+      compatible_with:
+        floor_families: [clt_floor]
+        column_families: [glulam_column, steel_uc_column, rc_rectangular_column]
+      disallow:
+        floor_families: [double_tee, hollowcore]
+
+  column:
+    rc_rectangular_column:
+      compatible_with:
+        floor_families: [flat_slab, pt_slab, hollowcore, double_tee, composite_deck, clt_floor]
+        beam_families: [rc_downstand_beam, steel_ub_composite, steel_cellular_beam, glulam_beam, precast_rc_beam]
+        lateral_families: [rc_core, rc_shear_wall, steel_braced_frame]
+
+    precast_rc_column:
+      compatible_with:
+        floor_families: [hollowcore, double_tee]
+        beam_families: [precast_rc_beam, rc_downstand_beam]
+        lateral_families: [rc_core, rc_shear_wall]
+
+    steel_uc_column:
+      compatible_with:
+        floor_families: [composite_deck, hollowcore, double_tee, clt_floor, pt_slab, flat_slab]
+        beam_families: [steel_ub_composite, steel_secondary_beam, steel_cellular_beam, glulam_beam, rc_downstand_beam]
+        lateral_families: [steel_braced_frame, steel_moment_frame, rc_core]
+
+    glulam_column:
+      compatible_with:
+        floor_families: [clt_floor]
+        beam_families: [glulam_beam, steel_ub_composite]
+        lateral_families: [timber_core, steel_braced_frame]
+      disallow:
+        floor_families: [double_tee, hollowcore]
+
+global_rules:
+  hard_disallow:
+    - floor_family: double_tee
+      column_family: glulam_column
+      reason: "Deep precast floor with timber columns is outside intended scope."
+
+    - floor_family: clt_floor
+      column_family: precast_rc_column
+      reason: "Not included in current hybrid scope."
+
+  soft_discourage:
+    - floor_family: clt_floor
+      column_family: rc_rectangular_column
+      reason: "Technically possible but usually not preferred."
+
+    - floor_family: pt_slab
+      primary_beam_family: precast_rc_beam
+      reason: "Usually not a preferred framing concept."
