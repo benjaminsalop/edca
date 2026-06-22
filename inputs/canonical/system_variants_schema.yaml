@@ -1,5 +1,5 @@
 name: system_variants
-description: Auto-generated schema for system_variants on 2026-02-17T11:26:32.917207+00:00Z
+description: Auto-generated schema for system_variants on 2026-06-04T07:57:33.872069+00:00
 columns:
 - name: system_variant
   type: string
@@ -7,19 +7,25 @@ columns:
 - name: system_family
   type: string
   units: null
-- name: unit
-  type: string
+- name: slab_length
+  type: integer
+  units: null
+- name: slab_width
+  type: number
   units: null
 - name: slab_depth
   type: number
   units: null
-- name: beam_depth
+- name: rib_depth
   type: number
   units: null
 - name: screed_depth
   type: number
   units: null
-- name: steel_depth
+- name: deck_depth
+  type: number
+  units: null
+- name: overall_depth
   type: number
   units: null
 - name: swt
@@ -34,10 +40,22 @@ columns:
 - name: max_span
   type: number
   units: null
+- name: secondary_beam_spacing_m
+  type: number
+  units: null
 - name: concrete_volume
   type: number
   units: null
+- name: screed_volume
+  type: number
+  units: null
 - name: steel_volume
+  type: number
+  units: null
+- name: rebar_volume
+  type: number
+  units: null
+- name: pt_volume
   type: number
   units: null
 - name: timber_volume
@@ -46,18 +64,90 @@ columns:
 - name: material_concrete_id
   type: string
   units: null
+- name: material_screed_id
+  type: string
+  units: null
+- name: material_pt_id
+  type: string
+  units: null
+- name: material_rebar_id
+  type: string
+  units: null
 - name: material_steel_id
   type: string
   units: null
 - name: material_timber_id
   type: string
   units: null
-- name: ebc_mm
-  type: integer
-  units: null
-- name: beam_ref
+- name: source
   type: string
   units: null
-- name: source
+- name: notes
+  type: string
+  units: null
+- name: component
+  type: string
+  units: null
+- name: floor_category
+  type: string
+  units: null
+- name: floor_type
+  type: string
+  units: null
+- name: span_behavior
+  type: string
+  units: null
+- name: manufacturer
+  type: string
+  units: null
+- name: material_family
+  type: string
+  units: null
+- name: construction_method
+  type: string
+  units: null
+- name: support_condition
+  type: string
+  units: null
+- name: unit
+  type: string
+  units: null
+- name: vibration_limit
+  type: number
+  units: null
+- name: fire_rating
+  type: string
+  units: null
+- name: acoustic_note
+  type: string
+  units: null
+- name: requires_rebar
+  type: integer
+  units: null
+- name: requires_pt
+  type: integer
+  units: null
+- name: requires_screed
+  type: integer
+  units: null
+- name: requires_topping
+  type: integer
+  units: null
+- name: requires_fireproofing
+  type: integer
+  units: null
+- name: beam_requirements
+  type: string
+  units: null
+- name: can_span_to_columns
+  type: integer
+  units: null
+- name: can_span_to_walls
+  type: integer
+  units: null
+- name: category
+  type: string
+  units: null
+- name: type
   type: string
   units: null

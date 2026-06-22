@@ -5,36 +5,183 @@
 
 meta:
   dataset: system_preferences
-  version: 0.1
+  version: 0.2
   description: >-
-    Ranking and filtering rules for selecting systems given a typology.
+    Ranking and filtering rules for selecting systems given a typology and
+    component. These rules are applied after basic code, span, and compatibility
+    screening. Field names should align with the systems CSV schemas.
 
 rules:
-  - name: default_floor_selection
+  - name: residential_floor_selection
     when:
       typology: midrise_concrete_residential
       component: floor
     filters:
-      unit: metric
-      category: [concrete, precast]
+      material_family: [concrete, precast]
     rank:
-      # ascending = lower is better
       - field: embodied_carbon
         direction: asc
       - field: cost
         direction: asc
-      - field: depth
+      - field: depth_overall
         direction: asc
 
-  - name: warehouse_roof
+  - name: residential_primary_beam_selection
     when:
-      typology: industrial_steel_warehouse
-      component: roof
+      typology: midrise_concrete_residential
+      component: beam
+      role: primary
     filters:
-      category: steel
-      type: metal_deck
+      material_family: [concrete, steel]
+      can_be_primary: true
+    rank:
+      - field: embodied_carbon
+        direction: asc
+      - field: cost
+        direction: asc
+      - field: depth_overall
+        direction: asc
+
+  - name: residential_column_selection
+    when:
+      typology: midrise_concrete_residential
+      component: column
+    filters:
+      material_family: [concrete, steel]
+    rank:
+      - field: embodied_carbon
+        direction: asc
+      - field: cost
+        direction: asc
+
+  - name: office_floor_selection
+    when:
+      typology: commercial_office_steel
+      component: floor
+    filters:
+      material_family: [steel, hybrid]
+      floor_type: [composite_deck, metal_deck]
     rank:
       - field: cost
         direction: asc
-      - field: depth
+      - field: depth_overall
+        direction: asc
+      - field: embodied_carbon
+        direction: asc
+
+  - name: office_primary_beam_selection
+    when:
+      typology: commercial_office_steel
+      component: beam
+      role: primary
+    filters:
+      material_family: [steel]
+      can_be_primary: true
+    rank:
+      - field: cost
+        direction: asc
+      - field: max_span
+        direction: desc
+      - field: steel_volume_per_m
+        direction: asc
+
+  - name: office_secondary_beam_selection
+    when:
+      typology: commercial_office_steel
+      component: beam
+      role: secondary
+    filters:
+      material_family: [steel]
+      can_be_secondary: true
+    rank:
+      - field: cost
+        direction: asc
+      - field: steel_volume_per_m
+        direction: asc
+
+  - name: industrial_primary_beam_selection
+    when:
+      typology: industrial_steel_warehouse
+      component: beam
+      role: primary
+    filters:
+      material_family: [steel]
+      can_be_primary: true
+    rank:
+      - field: max_span
+        direction: desc
+      - field: cost
+        direction: asc
+      - field: steel_volume_per_m
+        direction: asc
+
+  - name: hybrid_education_floor_selection
+    when:
+      typology: education_hybrid_lowrise
+      component: floor
+    filters:
+      material_family: [timber, hybrid]
+    rank:
+      - field: embodied_carbon
+        direction: asc
+      - field: depth_overall
+        direction: asc
+      - field: cost
+        direction: asc
+
+  - name: hybrid_education_beam_selection
+    when:
+      typology: education_hybrid_lowrise
+      component: beam
+    filters:
+      material_family: [timber, steel, hybrid]
+    rank:
+      - field: embodied_carbon
+        direction: asc
+      - field: cost
+        direction: asc
+
+  - name: healthcare_floor_selection
+    when:
+      typology: healthcare_concrete_midrise
+      component: floor
+    filters:
+      material_family: [concrete, hybrid]
+    rank:
+      - field: depth_overall
+        direction: asc
+      - field: embodied_carbon
+        direction: asc
+      - field: cost
+        direction: asc
+
+defaults:
+  floor:
+    rank:
+      - field: embodied_carbon
+        direction: asc
+      - field: cost
+        direction: asc
+      - field: depth_overall
+        direction: asc
+
+  beam:
+    rank:
+      - field: embodied_carbon
+        direction: asc
+      - field: cost
+        direction: asc
+
+  column:
+    rank:
+      - field: embodied_carbon
+        direction: asc
+      - field: cost
+        direction: asc
+
+  lateral:
+    rank:
+      - field: embodied_carbon
+        direction: asc
+      - field: cost
         direction: asc

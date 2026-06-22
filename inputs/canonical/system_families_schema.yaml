@@ -1,5 +1,5 @@
 name: system_families
-description: Auto-generated schema for system_families on 2026-02-17T11:26:32.909536+00:00Z
+description: Auto-generated schema for system_families on 2026-06-04T07:57:33.483685+00:00
 columns:
 - name: system_family
   type: string
@@ -7,10 +7,10 @@ columns:
 - name: component
   type: string
   units: null
-- name: category
+- name: floor_category
   type: string
   units: null
-- name: type
+- name: floor_type
   type: string
   units: null
 - name: span_behavior
@@ -19,13 +19,28 @@ columns:
 - name: manufacturer
   type: string
   units: null
+- name: material_family
+  type: string
+  units: null
+- name: construction_method
+  type: string
+  units: null
+- name: support_condition
+  type: string
+  units: null
 - name: unit
   type: string
   units: null
-- name: width
-  type: number
-  units: null
 - name: material_concrete_id
+  type: string
+  units: null
+- name: material_screed_id
+  type: string
+  units: null
+- name: material_pt_id
+  type: string
+  units: null
+- name: material_rebar_id
   type: string
   units: null
 - name: material_steel_id
@@ -34,6 +49,48 @@ columns:
 - name: material_timber_id
   type: string
   units: null
+- name: vibration_limit
+  type: number
+  units: null
+- name: fire_rating
+  type: string
+  units: null
+- name: acoustic_note
+  type: string
+  units: null
+- name: requires_rebar
+  type: integer
+  units: null
+- name: requires_pt
+  type: integer
+  units: null
+- name: requires_screed
+  type: integer
+  units: null
+- name: requires_topping
+  type: integer
+  units: null
+- name: requires_fireproofing
+  type: integer
+  units: null
+- name: beam_requirements
+  type: string
+  units: null
+- name: can_span_to_columns
+  type: integer
+  units: null
+- name: can_span_to_walls
+  type: integer
+  units: null
 - name: source
+  type: string
+  units: null
+- name: notes
+  type: string
+  units: null
+- name: category
+  type: string
+  units: null
+- name: type
   type: string
   units: null

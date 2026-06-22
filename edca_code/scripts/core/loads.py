@@ -1,646 +1,564 @@
 from __future__ import annotations
 
-import logging
-import re
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass, field
+from typing import Any
 
-import pandas as pd
-import yaml
-
-logger = logging.getLogger(__name__)
-
-Number = Union[int, float]
-
-
-
-# -------------------------
-# YAML helpers
-# -------------------------
-def read_yaml(path: Union[str, Path]) -> Dict[str, Any]:
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"YAML not found: {p}")
-    with p.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"YAML must parse to dict: {p}")
-    return data
-
-def resolve_psi_key(
-    occupancy_key: str,
-    load_values: Dict[str, Any],
-    *,
-    unit: Optional[str] = None,
-    code_standard: Optional[str] = None,
-    default_base: str = "office",) -> Tuple[str, str]:
-    """
-    Map an occupancy (e.g. 'Laboratory_EC') to an available psi.Q key in load_values.yaml.
-
-    Returns (psi_key, strategy_used).
-    """
-
-    # pull the available psi keys
-    psi_root = None
-    if isinstance(load_values.get("EN1990"), dict) and isinstance(load_values.get("EN1990", {}).get("psi"), dict):
-        psi_root = load_values["EN1990"]["psi"]
-    elif isinstance(load_values.get("psi"), dict):
-        psi_root = load_values["psi"]
-
-    psiQ = (psi_root or {}).get("Q", {}) if isinstance(psi_root, dict) else {}
-    if not isinstance(psiQ, dict) or not psiQ:
-        # if psi is missing, just fall back
-        return f"{default_base}_EC", "no_psi_in_yaml_fallback"
-
-    available = set(psiQ.keys())
-
-    occ = str(occupancy_key).strip()
-    occ_l = occ.lower()
-
-    # choose suffix preference
-    cs = (code_standard or "").lower()
-    u = (unit or "").lower()
-    prefer_ec = ("euro" in cs) or (u in {"metric", "si"})
-    suf = "_EC" if prefer_ec else "_ASCE"
-
-    def norm_key(s: str) -> str:
-        return s.strip()
-
-    # Try direct candidates first (case-insensitive match)
-    candidates = [
-        occ,
-        occ_l,
-        # if it isn't suffixed, append suffix
-        (occ + suf) if not re.search(r"_(EC|ASCE)$", occ, flags=re.IGNORECASE) else occ,
-        (occ_l + suf.lower()) if not re.search(r"_(ec|asce)$", occ_l) else occ_l,
-    ]
-
-    # If already suffixed (Laboratory_EC), also try base + suffix in lowercase
-    base = re.sub(r"_(EC|ASCE)$", "", occ, flags=re.IGNORECASE)
-    base_l = base.lower()
-    candidates += [
-        f"{base}{suf}",
-        f"{base_l}{suf.lower()}",
-    ]
-
-    # Match against available keys with casefold
-    avail_casefold = {k.lower(): k for k in available}
-    for c in candidates:
-        k = avail_casefold.get(norm_key(c).lower())
-        if k:
-            return k, "direct_or_casefold"
-
-    # Synonym mapping to the *known* EN1990 categories in your YAML
-    # (edit these mappings as you like)
-    synonym_base_map = {
-        # offices / work areas
-        "lab": "office",
-        "laboratory": "office",
-        "research": "office",
-        "clinic": "office",
-
-        # people congregate
-        "lecture": "assembly",
-        "auditorium": "assembly",
-        "theatre": "assembly",
-        "classroom": "assembly",
-        "teaching": "assembly",
-
-        # storage
-        "warehouse": "storage",
-        "archive": "storage",
-        "plant": "storage",
-
-        # retail
-        "retail": "shopping",
-        "shop": "shopping",
-
-        # parking
-        "garage": "parking",
-        "carpark": "parking",
-        "parking": "parking",
-
-        # residential
-        "hotel": "residential",
-        "dorm": "residential",
-        "residential": "residential",
-    }
-
-    # heuristic: if occupancy contains any synonym token
-    for token, mapped in synonym_base_map.items():
-        if token in base_l:
-            key_try = f"{mapped}{suf}"
-            k = avail_casefold.get(key_try.lower())
-            if k:
-                return k, f"synonym:{token}->{mapped}"
-
-    # final fallback: default category
-    fallback = f"{default_base}{suf}"
-    k = avail_casefold.get(fallback.lower())
-    if k:
-        return k, f"fallback_default:{default_base}"
-
-    # if even that doesn't exist, return ANY key (deterministic) so you still run
-    any_key = sorted(list(available))[0]
-    return any_key, f"fallback_any:{any_key}"
+from .analysis_models import (
+    AssemblyAnalysisInput,
+    BeamDemand,
+    ColumnDemand,
+    DemandEnvelope,
+    FloorPanelDemand,
+    ForceEffects,
+    LateralDemand,
+    StoreyForces,
+    TorsionalDemand,
+    WallDemand,
+)
+from .domain_models import (
+    AssemblyCandidate,
+    EvaluatedLoadCombination,
+    LoadCombinationExpression,
+    LoadPathMethod,
+    Occupancy,
+    ProjectContext,
+)
+from .exceptions import LoadResolutionError, UnsupportedConfigurationError
+from .repositories import RepositoryQueryService
 
 
-def get_by_path(d: Dict[str, Any], path: str) -> Any:
-    """
-    Resolve dotted paths like 'EN1990.gamma.ULS.Q' into nested dicts.
+@dataclass(slots=True)
+class ResolvedLoadCase:
+    occupancy_id: str
+    dead_kpa: float
+    live_kpa: float
+    partition_kpa: float = 0.0
+    roof_live_kpa: float = 0.0
+    snow_kpa: float = 0.0
+    rain_kpa: float = 0.0
+    wind_kpa: float = 0.0
+    seismic_kpa: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    DEFENSIVE: if a key isn't found, try a case-insensitive match among dict keys.
-    """
-    cur: Any = d
-    for key in path.split("."):
-        if not isinstance(cur, dict):
-            raise KeyError(f"Missing path '{path}' at '{key}' (parent not a dict)")
+    @property
+    def superimposed_dead_kpa(self) -> float:
+        return self.dead_kpa + self.partition_kpa
 
-        if key in cur:
-            cur = cur[key]
-            continue
-
-        # case-insensitive fallback (fixes Assembly_EC vs assembly_EC)
-        key_l = key.lower()
-        match = None
-        for k in cur.keys():
-            if isinstance(k, str) and k.lower() == key_l:
-                match = k
-                break
-
-        if match is None:
-            raise KeyError(f"Missing path '{path}' at '{key}'")
-
-        cur = cur[match]
-
-    return cur
+    @property
+    def total_gravity_unfactored_kpa(self) -> float:
+        return self.dead_kpa + self.partition_kpa + self.live_kpa
 
 
-
-NUM_RE = re.compile(r"^\s*[+-]?(\d+(\.\d*)?|\.\d+)\s*$")
-
-
-def eval_factor_expr(expr: Union[str, Number], values: Dict[str, Any], occupancy_key: str) -> float:
-    """
-    Evaluate expressions like:
-      'EN1990.gamma.ULS.Q * EN1990.psi.Q.{occupancy}.psi0'
-    by multiplying pieces separated by '*'.
-    """
-    if isinstance(expr, (int, float)):
-        return float(expr)
-
-    s = str(expr).strip().replace("{occupancy}", occupancy_key)
-
-    parts = [p.strip() for p in s.split("*") if p.strip()]
-    out = 1.0
-    for part in parts:
-        if NUM_RE.match(part):
-            out *= float(part)
-        else:
-            out *= float(get_by_path(values, part))
-    return float(out)
+@dataclass(slots=True)
+class DistributionParameters:
+    span_x_m: float | None = None
+    span_y_m: float | None = None
+    tributary_width_m: float | None = None
+    tributary_area_m2: float | None = None
+    storey_count: int | None = None
+    floor_to_floor_m: float | None = None
+    accidental_torsion_ratio: float = 0.05
 
 
-def inject_aliases(values: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Your combos refer to EN1990.psi..., but your values YAML stores psi at top-level.
-    Create an alias so EN1990.psi... resolves properly.
-    """
-    if "EN1990" in values and "psi" in values and isinstance(values["EN1990"], dict):
-        values["EN1990"].setdefault("psi", values["psi"])
-    return values
+class LoadCombinationEngine:
+    """Resolves symbolic repository load-combination templates into numeric factors."""
 
-def resolve_occupancy_key(
-    occ_token: str,
-    occ_lookup: Dict[str, object],
-    *,
-    unit: Optional[str] = None,
-    code_standard: Optional[str] = None,
-) -> Tuple[str, str]:
-    """
-    Resolve a program occupancy token like 'assembly' into the key used in occupancies.csv
-    like 'assembly_EC' or 'assembly_ASCE'.
+    def __init__(self, query: RepositoryQueryService):
+        self.query = query
 
-    Returns (resolved_key, strategy_used).
+    def resolve_for_project(self, project: ProjectContext, occupancy: Occupancy) -> list[EvaluatedLoadCombination]:
+        code_family = self._canonical_code_family(project.code_family or occupancy.code_family)
+        load_values = self.query.repo.config.get("load_values", {}) or {}
+        out: list[EvaluatedLoadCombination] = []
 
-    Strategy:
-      1) if token exists exactly, use it
-      2) if token already has suffix _EC/_ASCE and exists, use it
-      3) append preferred suffix based on code_standard/unit and try
-      4) try the other suffix
-      5) finally try raw token again (case/strip normalizations are handled by caller)
-    """
-    occ = str(occ_token).strip()
-
-    if occ in occ_lookup:
-        return occ, "exact"
-
-    # detect already-suffixed
-    upper = occ.upper()
-    if upper.endswith("_EC") or upper.endswith("_ASCE"):
-        if occ in occ_lookup:
-            return occ, "already_suffixed_exact"
-        # sometimes case differs (e.g., Assembly_EC vs assembly_EC)
-        for k in occ_lookup.keys():
-            if k.lower() == occ.lower():
-                return k, "already_suffixed_casefold"
-
-    # choose preferred suffix
-    cs = (code_standard or "").lower()
-    u = (unit or "").lower()
-
-    prefer_ec = ("euro" in cs) or (u in {"metric", "si"})
-    preferred = "_EC" if prefer_ec else "_ASCE"
-    alternate = "_ASCE" if preferred == "_EC" else "_EC"
-
-    # helper: add suffix only if not present
-    def with_suffix(base: str, suf: str) -> str:
-        b = base
-        if b.upper().endswith("_EC") or b.upper().endswith("_ASCE"):
-            return b
-        return f"{b}{suf}"
-
-    cand1 = with_suffix(occ, preferred)
-    if cand1 in occ_lookup:
-        return cand1, f"preferred_suffix{preferred}"
-
-    # casefold match for cand1
-    for k in occ_lookup.keys():
-        if k.lower() == cand1.lower():
-            return k, f"preferred_suffix_casefold{preferred}"
-
-    cand2 = with_suffix(occ, alternate)
-    if cand2 in occ_lookup:
-        return cand2, f"alternate_suffix{alternate}"
-
-    for k in occ_lookup.keys():
-        if k.lower() == cand2.lower():
-            return k, f"alternate_suffix_casefold{alternate}"
-
-    # last-ditch: try raw token casefold
-    for k in occ_lookup.keys():
-        if k.lower() == occ.lower():
-            return k, "raw_casefold"
-
-    raise KeyError(
-        f"Occupancy '{occ_token}' not found. Tried: "
-        f"{occ!r}, {cand1!r}, {cand2!r}. "
-        f"Available examples: {list(sorted(list(occ_lookup.keys())))[:15]}..."
-    )
-
-# -------------------------
-# Combo evaluation
-# -------------------------
-def compute_en1990_uls_combos(
-    raw_sdl: float,
-    raw_ll: float,
-    occupancy_key: str,
-    load_values: Dict[str, Any],
-    load_combos: Dict[str, Any],
-) -> List[Dict[str, Any]]:
-    """
-    Returns list of dicts: {name, total, factors}
-    """
-    out: List[Dict[str, Any]] = []
-    uls = (load_combos.get("EN1990", {}) or {}).get("ULS", {}) or {}
-    if not isinstance(uls, dict):
+        for template in self.query.repo.load_combinations:
+            if self._canonical_code_family(template.code_family) != code_family:
+                continue
+            for i, expression in enumerate(template.expressions):
+                out.append(
+                    EvaluatedLoadCombination(
+                        code_family=code_family,
+                        design_basis=template.design_basis,
+                        combination_id=template.combination_id,
+                        resolved_factors=self._resolve_expression_factors(
+                            expression=expression,
+                            project=project,
+                            occupancy=occupancy,
+                            load_values=load_values,
+                            code_family=code_family,
+                        ),
+                        source_expression_index=i,
+                    )
+                )
+        if not out:
+            raise LoadResolutionError(
+                f"No load combinations available for code family '{code_family}'"
+            )
         return out
 
-    # base mapping for your current schema: just G and one Q (LL)
-    def load_for_action(action: str) -> float:
-        if action in ("G", "G_unf"):
-            return raw_sdl
-        if action == "G_fav":
-            return 0.0
-        if action == "Q_lead":
-            return raw_ll
-        if action == "Q_acc":
-            # IMPORTANT: do NOT double-count LL as both leading+accompanying when LL is the only Q.
-            return 0.0
-        return 0.0
+    def _resolve_expression_factors(
+        self,
+        *,
+        expression: LoadCombinationExpression,
+        project: ProjectContext,
+        occupancy: Occupancy,
+        load_values: dict[str, Any],
+        code_family: str,
+    ) -> dict[str, float]:
+        result: dict[str, float] = {}
+        for action in expression.actions:
+            result[action.action] = self._resolve_factor_value(
+                action.factor,
+                project=project,
+                occupancy=occupancy,
+                load_values=load_values,
+                code_family=code_family,
+            )
+        return result
 
-    gamma_g = float(get_by_path(load_values, "EN1990.gamma.ULS.G"))
-    gamma_q = float(get_by_path(load_values, "EN1990.gamma.ULS.Q"))
+    def _resolve_factor_value(
+        self,
+        factor: float | str,
+        *,
+        project: ProjectContext,
+        occupancy: Occupancy,
+        load_values: dict[str, Any],
+        code_family: str,
+    ) -> float:
+        if isinstance(factor, (int, float)):
+            return float(factor)
 
-    # psi0 is still useful metadata (and will matter once you add additional variable actions)
-    psi0 = None
-    try:
-        psi0 = float(get_by_path(load_values, f"EN1990.psi.Q.{occupancy_key}.psi0"))
-    except Exception:
-        psi0 = None
+        expr = str(factor).strip()
+        if not expr:
+            raise LoadResolutionError("Encountered empty load factor expression.")
 
-    for combo_name, spec in uls.items():
-        expr_list = spec.get("expression") if isinstance(spec, dict) else None
-        if not isinstance(expr_list, list):
-            continue
-
-        total = 0.0
-        for term in expr_list:
-            if not isinstance(term, dict):
+        occupancy_token = self._occupancy_factor_key(project=project, occupancy=occupancy, code_family=code_family)
+        expr = expr.replace("{occupancy}", occupancy_token)
+        terms = [t.strip() for t in expr.split("*")]
+        value = 1.0
+        for term in terms:
+            if not term:
                 continue
-            action = str(term.get("action", "")).strip()
-            factor_expr = term.get("factor", 1.0)
-            f = eval_factor_expr(factor_expr, load_values, occupancy_key)
-            total += load_for_action(action) * f
+            value *= self._resolve_single_term(term, load_values)
+        return float(value)
 
-        out.append({
-            "name": combo_name,
-            "total": float(total),
-            "factors": {
-                "DL": gamma_g,
-                "LL": gamma_q,
-                **({"psi0": psi0} if psi0 is not None else {}),
-            },
-        })
-
-    return out
-
-
-def compute_asce7_lrfd_combos(
-    raw_sdl: float,
-    raw_ll: float,
-    load_combos: Dict[str, Any],
-) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    lrfd = ((load_combos.get("ASCE7", {}) or {}).get("LRFD", {}) or {})
-    if not isinstance(lrfd, dict):
-        return out
-
-    def load_for_action(action: str) -> float:
-        # minimal mapping for now
-        if action == "D":
-            return raw_sdl
-        if action == "L":
-            return raw_ll
-        return 0.0
-
-    for name, spec in lrfd.items():
-        if not isinstance(spec, dict):
-            continue
-        alts = spec.get("alternatives")
-        if not isinstance(alts, list):
-            continue
-
-        best_total = None
-        best = None
-        for alt in alts:
-            expr_list = alt.get("expression") if isinstance(alt, dict) else None
-            if not isinstance(expr_list, list):
-                continue
-            total = 0.0
-            factors: Dict[str, float] = {}
-            for term in expr_list:
-                if not isinstance(term, dict):
-                    continue
-                action = str(term.get("action", "")).strip()
-                f = float(term.get("factor", 1.0))
-                total += load_for_action(action) * f
-                if action in ("D", "L"):
-                    factors[action] = f
-
-            if best_total is None or total > best_total:
-                best_total = float(total)
-                best = {"name": name, "total": float(total), "factors": factors}
-
-        if best is not None:
-            out.append(best)
-
-    return out
-
-
-def resolve_span_values(cf, args, logger: Optional[logging.Logger] = None) -> List[float]:
-    """
-    Resolve the list of span values (in metres) to evaluate.
-
-    Priority:
-      1) CLI overrides (--span-min/--span-max/--span-step/--no-sweep)
-      2) Control file spans list (cf.spans) already parsed/expanded by parse.parse_spans
-      3) Fallback to cf.ideal_column_spacing (single value) or 6.0 m
-    """
-    log = logger or globals().get("logger") or logging.getLogger("spans")
-
-    # 1) CLI overrides take precedence if either bound is provided
-    span_min = getattr(args, "span_min", None)
-    span_max = getattr(args, "span_max", None)
-    span_step = float(getattr(args, "span_step", 0.5) or 0.5)
-    no_sweep = bool(getattr(args, "no_sweep", False))
-
-    if span_min is not None or span_max is not None:
-        # If only one bound provided, treat it as a single span
-        if span_min is None:
-            span_min = float(span_max)
-        if span_max is None:
-            span_max = float(span_min)
-
-        mn = float(span_min)
-        mx = float(span_max)
-        if mx < mn:
-            mn, mx = mx, mn
-
-        if no_sweep or abs(mx - mn) < 1e-9:
-            spans = [round(mn, 6)]
-            log.info("[span] Span override: evaluating single span %.3f m (--no-sweep or equal bounds).", spans[0])
-            return spans
-
-        if span_step <= 0:
-            span_step = 0.5
-            log.warning("[span] Invalid --span-step; defaulting to %.2f m.", span_step)
-
-        spans: List[float] = []
-        x = mn
-        # inclusive sweep with tolerance
-        while x <= mx + 1e-9:
-            spans.append(round(x, 6))
-            x += span_step
-
-        log.info("[span] Span override: sweeping %.3f..%.3f m step=%.3f (%d values).", mn, mx, span_step, len(spans))
-        return spans
-
-    # 2) Control file spans
-    cf_spans = getattr(cf, "spans", None)
-    if isinstance(cf_spans, (list, tuple)) and len(cf_spans) > 0:
-        spans = [float(v) for v in cf_spans]
-        if no_sweep:
-            spans = [min(spans)]
-            log.info("[span] Control-file spans present but --no-sweep specified; using min span %.3f m.", spans[0])
-        return spans
-
-    # 3) Fallbacks
-    ics = getattr(cf, "ideal_column_spacing", None)
-    if ics is not None:
+    def _resolve_single_term(self, term: str, load_values: dict[str, Any]) -> float:
         try:
-            spans = [float(ics)]
-            log.warning("[span] No spans specified; falling back to IDEAL_COLUMN_SPACING=%.3f m.", spans[0])
-            return spans
-        except Exception:
+            return float(term)
+        except ValueError:
             pass
 
-    log.warning("[span] No spans specified; falling back to default span 6.0 m.")
-    return [6.0]
+        current: Any = load_values
+        for part in term.split("."):
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                raise LoadResolutionError(f"Could not resolve load factor path '{term}'")
+        try:
+            return float(current)
+        except Exception as exc:
+            raise LoadResolutionError(f"Resolved non-numeric load factor '{term}' -> {current!r}") from exc
+
+    def _canonical_code_family(self, value: str | None) -> str:
+        token = str(value or "EC").strip().upper()
+        if token in {"EC", "EN", "EUROCODE", "EN1990"}:
+            return "EN1990"
+        if token in {"ASCE", "ASCE7", "ASD", "LRFD"}:
+            return "ASCE7"
+        return token
+
+    def _occupancy_factor_key(self, *, project: ProjectContext, occupancy: Occupancy, code_family: str) -> str:
+        explicit = occupancy.reduction_group or occupancy.metadata.get("reduction_group")
+        if explicit:
+            return str(explicit)
+
+        base = (
+            occupancy.metadata.get("load_category")
+            or occupancy.category
+            or occupancy.occupancy_id
+            or project.occupancy_id
+            or "office"
+        )
+        base_token = str(base).strip().lower().replace(" ", "_")
+        if code_family == "EN1990":
+            if not base_token.endswith("_ec"):
+                base_token = f"{base_token}_EC"
+            return base_token
+        return base_token.upper()
 
 
-# -------------------------
-# Public API
-# -------------------------
-def build_load_context(
-    cf: Any,
-    occupancies_csv: Union[str, Path],
-    load_values_yaml: Optional[Union[str, Path]] = None,
-    load_combinations_yaml: Optional[Union[str, Path]] = None,
-) -> Tuple[Dict[str, float], Dict[str, List[int]], pd.DataFrame]:
-    """
-    Returns:
-      required_loads: dict with max_sdl/max_ll (+ factored maxima)
-      floors_by_case: occupancy -> list of floors
-      loads_df_floor: per-floor rows, including combo lists and factored outputs
-    """
-    occ_path = Path(occupancies_csv)
+class LoadDistributionEngine:
+    """Converts area loads and lateral placeholders into member-level demand objects."""
 
-    # Auto-locate YAMLs next to occupancies.csv unless explicitly passed
-    if load_values_yaml is None:
-        load_values_yaml = occ_path.with_name("load_values.yaml")
-    if load_combinations_yaml is None:
-        load_combinations_yaml = occ_path.with_name("load_combinations.yaml")
+    def build_analysis_input(
+        self,
+        *,
+        project: ProjectContext,
+        candidate: AssemblyCandidate,
+        resolved_case: ResolvedLoadCase,
+        load_combinations: list[EvaluatedLoadCombination],
+    ) -> AssemblyAnalysisInput:
+        params = self._distribution_parameters(project)
+        governing_gravity = self._governing_gravity_combo(load_combinations, resolved_case)
+        governing_lateral = self._governing_lateral_combo(load_combinations, resolved_case)
 
-    load_values = inject_aliases(read_yaml(load_values_yaml))
-    load_combos = read_yaml(load_combinations_yaml)
+        floor = self._build_floor_demand(candidate, resolved_case, params, governing_gravity)
+        primary_beam = self._build_primary_beam_demand(candidate, resolved_case, params, governing_gravity)
+        secondary_beam = self._build_secondary_beam_demand(candidate, resolved_case, params, governing_gravity)
+        column = self._build_column_demand(candidate, resolved_case, params, governing_gravity)
+        wall = self._build_wall_demand(candidate, resolved_case, params, governing_gravity)
+        lateral = self._build_lateral_demand(candidate, resolved_case, params, governing_lateral)
+        torsion = self._build_torsional_demand(candidate, resolved_case, params, lateral)
 
-    occ_df = pd.read_csv(occ_path)
+        return AssemblyAnalysisInput(
+            candidate_id=candidate.candidate_id,
+            load_path_method=candidate.load_path_method,
+            load_combinations=load_combinations,
+            floor=floor,
+            primary_beam=primary_beam,
+            secondary_beam=secondary_beam,
+            column=column,
+            wall=wall,
+            lateral=lateral,
+            torsion=torsion,
+            metadata={
+                "occupancy_id": resolved_case.occupancy_id,
+                "distribution_parameters": params.__dict__,
+            },
+        )
 
-    # Normalize columns
-    colmap = {c: c.strip().lower() for c in occ_df.columns}
-    occ_df = occ_df.rename(columns=colmap)
+    def _distribution_parameters(self, project: ProjectContext) -> DistributionParameters:
+        span_x = project.geometry.span_x_m
+        span_y = project.geometry.span_y_m
+        tributary_width = min(v for v in [span_x, span_y] if v is not None) if any(v is not None for v in [span_x, span_y]) else None
+        tributary_area = None
+        if span_x is not None and span_y is not None:
+            tributary_area = span_x * span_y
+        elif project.geometry.bay_area_m2 is not None:
+            tributary_area = project.geometry.bay_area_m2
 
-    def pick_col(cands: List[str]) -> Optional[str]:
-        for c in cands:
-            if c in occ_df.columns:
-                return c
+        ratio = float(project.design_options.get("accidental_torsion_ratio", 0.05) or 0.05)
+        return DistributionParameters(
+            span_x_m=span_x,
+            span_y_m=span_y,
+            tributary_width_m=tributary_width,
+            tributary_area_m2=tributary_area,
+            storey_count=project.geometry.storey_count,
+            floor_to_floor_m=project.geometry.floor_to_floor_m,
+            accidental_torsion_ratio=ratio,
+        )
+
+    def _governing_gravity_combo(
+        self,
+        load_combinations: list[EvaluatedLoadCombination],
+        resolved_case: ResolvedLoadCase,
+    ) -> tuple[EvaluatedLoadCombination | None, float]:
+        best_combo = None
+        best_load = 0.0
+        for combo in load_combinations:
+            total = self._gravity_area_load_for_combo(combo, resolved_case)
+            if total >= best_load:
+                best_combo = combo
+                best_load = total
+        return best_combo, best_load
+
+    def _governing_lateral_combo(
+        self,
+        load_combinations: list[EvaluatedLoadCombination],
+        resolved_case: ResolvedLoadCase,
+    ) -> tuple[EvaluatedLoadCombination | None, float]:
+        best_combo = None
+        best_pressure = 0.0
+        for combo in load_combinations:
+            total = self._lateral_pressure_for_combo(combo, resolved_case)
+            if total >= best_pressure:
+                best_combo = combo
+                best_pressure = total
+        return best_combo, best_pressure
+
+    def _gravity_area_load_for_combo(self, combo: EvaluatedLoadCombination, case: ResolvedLoadCase) -> float:
+        f = combo.resolved_factors
+        dead = f.get("G", f.get("G_unf", f.get("D", 0.0))) * case.dead_kpa
+        dead += f.get("G", f.get("G_unf", f.get("D", 0.0))) * case.partition_kpa
+        live = f.get("Q", f.get("Q_lead", f.get("L", 0.0))) * case.live_kpa
+        live += f.get("Lr", 0.0) * case.roof_live_kpa
+        live += f.get("S", 0.0) * case.snow_kpa
+        live += f.get("R", 0.0) * case.rain_kpa
+        return float(dead + live)
+
+    def _lateral_pressure_for_combo(self, combo: EvaluatedLoadCombination, case: ResolvedLoadCase) -> float:
+        f = combo.resolved_factors
+        wind = f.get("W", 0.0) * case.wind_kpa + f.get("Wt", 0.0) * case.wind_kpa
+        seismic = f.get("E", 0.0) * case.seismic_kpa
+        return float(wind + seismic)
+
+    def _build_floor_demand(self, candidate: AssemblyCandidate, case: ResolvedLoadCase, params: DistributionParameters, governing: tuple[EvaluatedLoadCombination | None, float]) -> FloorPanelDemand:
+        combo, factored = governing
+        return FloorPanelDemand(
+            tributary_area_m2=params.tributary_area_m2,
+            unfactored_area_load_kpa=case.total_gravity_unfactored_kpa,
+            factored_area_load_kpa=factored,
+            envelope=DemandEnvelope(
+                governing_combination_id=(combo.combination_id if combo else None),
+                effects=ForceEffects(),
+                metadata={"component": "floor", "occupancy_id": case.occupancy_id},
+            ),
+        )
+
+    def _framing_mode(self, candidate: AssemblyCandidate) -> LoadPathMethod:
+        mode = candidate.load_path_method
+        if mode != LoadPathMethod.CUSTOM:
+            return mode
+        if candidate.primary_beam_family_id is None:
+            return LoadPathMethod.BEAMLESS
+        if candidate.secondary_beam_family_id is None:
+            return LoadPathMethod.ONE_WAY_WITH_PRIMARY_ONLY
+        return LoadPathMethod.TWO_WAY_WITH_SECONDARY_AND_PRIMARY
+
+    def _primary_beam_tributary_width(self, candidate: AssemblyCandidate, params: DistributionParameters) -> float | None:
+        mode = self._framing_mode(candidate)
+        if mode == LoadPathMethod.BEAMLESS:
+            return None
+        if mode == LoadPathMethod.ONE_WAY_WITH_PRIMARY_ONLY:
+            return params.span_y_m or params.tributary_width_m
+        if mode == LoadPathMethod.TWO_WAY_WITH_SECONDARY_AND_PRIMARY:
+            return (params.span_y_m / 2.0) if params.span_y_m is not None else params.tributary_width_m
+        return params.tributary_width_m
+
+    def _secondary_beam_tributary_width(self, candidate: AssemblyCandidate, params: DistributionParameters) -> float | None:
+        mode = self._framing_mode(candidate)
+        if mode != LoadPathMethod.TWO_WAY_WITH_SECONDARY_AND_PRIMARY:
+            return None
+        return params.span_x_m or params.tributary_width_m
+
+    def _column_tributary_area(self, params: DistributionParameters) -> float | None:
+        if params.span_x_m is not None and params.span_y_m is not None:
+            return params.span_x_m * params.span_y_m
+        return params.tributary_area_m2
+
+    def _build_primary_beam_demand(self, candidate: AssemblyCandidate, case: ResolvedLoadCase, params: DistributionParameters, governing: tuple[EvaluatedLoadCombination | None, float]) -> BeamDemand | None:
+        if candidate.primary_beam_family_id is None:
+            return None
+        combo, factored_area = governing
+        tributary_width = self._primary_beam_tributary_width(candidate, params)
+        line_load = factored_area * tributary_width if tributary_width is not None else None
+        span = params.span_x_m
+        moment = line_load * span**2 / 8.0 if line_load is not None and span is not None else None
+        shear = line_load * span / 2.0 if line_load is not None and span is not None else None
+        return BeamDemand(
+            role="primary",
+            span_m=span,
+            tributary_width_m=tributary_width,
+            unfactored_line_load_kn_per_m=(case.total_gravity_unfactored_kpa * tributary_width if tributary_width is not None else None),
+            factored_line_load_kn_per_m=line_load,
+            envelope=DemandEnvelope(
+                governing_combination_id=(combo.combination_id if combo else None),
+                effects=ForceEffects(moment_major=moment, shear_major=shear),
+                metadata={"component": "primary_beam", "framing_mode": self._framing_mode(candidate).value},
+            ),
+        )
+
+    def _build_secondary_beam_demand(self, candidate: AssemblyCandidate, case: ResolvedLoadCase, params: DistributionParameters, governing: tuple[EvaluatedLoadCombination | None, float]) -> BeamDemand | None:
+        if candidate.secondary_beam_family_id is None:
+            return None
+        combo, factored_area = governing
+        tributary_width = self._secondary_beam_tributary_width(candidate, params)
+        line_load = factored_area * tributary_width if tributary_width is not None else None
+        span = params.span_y_m
+        moment = line_load * span**2 / 8.0 if line_load is not None and span is not None else None
+        shear = line_load * span / 2.0 if line_load is not None and span is not None else None
+        return BeamDemand(
+            role="secondary",
+            span_m=span,
+            tributary_width_m=tributary_width,
+            unfactored_line_load_kn_per_m=(case.total_gravity_unfactored_kpa * tributary_width if tributary_width is not None else None),
+            factored_line_load_kn_per_m=line_load,
+            envelope=DemandEnvelope(
+                governing_combination_id=(combo.combination_id if combo else None),
+                effects=ForceEffects(moment_major=moment, shear_major=shear),
+                metadata={"component": "secondary_beam", "framing_mode": self._framing_mode(candidate).value},
+            ),
+        )
+
+    def _build_column_demand(self, candidate: AssemblyCandidate, case: ResolvedLoadCase, params: DistributionParameters, governing: tuple[EvaluatedLoadCombination | None, float]) -> ColumnDemand | None:
+        if candidate.column_family_id is None:
+            return None
+        combo, factored_area = governing
+        tributary_area = self._column_tributary_area(params)
+        storeys = params.storey_count or 1
+        axial_total = factored_area * tributary_area * storeys if tributary_area is not None else None
+        dead = case.superimposed_dead_kpa * tributary_area * storeys if tributary_area is not None else None
+        live = case.live_kpa * tributary_area * storeys if tributary_area is not None else None
+        return ColumnDemand(
+            storey=1,
+            tributary_area_m2=tributary_area,
+            axial_dead_kn=dead,
+            axial_live_kn=live,
+            effective_length_m=params.floor_to_floor_m,
+            envelope=DemandEnvelope(
+                governing_combination_id=(combo.combination_id if combo else None),
+                effects=ForceEffects(axial=axial_total),
+                metadata={
+                    "component": "column",
+                    "storeys_accumulated": storeys,
+                    "framing_mode": self._framing_mode(candidate).value,
+                    "tributary_area_basis_m2": tributary_area,
+                },
+            ),
+        )
+
+    def _build_wall_demand(self, candidate: AssemblyCandidate, case: ResolvedLoadCase, params: DistributionParameters, governing: tuple[EvaluatedLoadCombination | None, float]) -> WallDemand | None:
+        if candidate.floor_family_id is None:
+            return None
+        floor_family = candidate.floor_family_id
+        spans_to_wall = floor_family is not None and candidate.primary_beam_family_id is None
+        if not spans_to_wall:
+            return None
+        combo, factored_area = governing
+        tributary_width = params.span_x_m or params.span_y_m
+        axial = factored_area * params.tributary_area_m2 if params.tributary_area_m2 is not None else None
+        return WallDemand(
+            storey=1,
+            tributary_width_m=tributary_width,
+            axial_kn=axial,
+            envelope=DemandEnvelope(
+                governing_combination_id=(combo.combination_id if combo else None),
+                effects=ForceEffects(axial=axial),
+                metadata={"component": "wall", "path": "gravity_support_wall"},
+            ),
+        )
+
+    def _build_lateral_demand(self, candidate: AssemblyCandidate, case: ResolvedLoadCase, params: DistributionParameters, governing: tuple[EvaluatedLoadCombination | None, float]) -> LateralDemand | None:
+        if candidate.lateral_family_id is None:
+            return None
+        combo, governing_pressure = governing
+        span_x = params.span_x_m or 0.0
+        span_y = params.span_y_m or 0.0
+        floor_to_floor = params.floor_to_floor_m or 0.0
+        storeys = params.storey_count or 1
+        plan_dim = max(span_x, span_y, 1.0)
+        storey_area = params.tributary_area_m2 or max(span_x * span_y, 1.0)
+        total_height = floor_to_floor * storeys if floor_to_floor else float(storeys)
+        base_shear = governing_pressure * storey_area * storeys
+        overturning = base_shear * total_height / 2.0 if total_height else None
+
+        storey_forces: list[StoreyForces] = []
+        if storeys > 0:
+            triangular_den = sum(range(1, storeys + 1))
+            for i in range(1, storeys + 1):
+                share = i / triangular_den
+                shear = base_shear * share
+                storey_forces.append(
+                    StoreyForces(
+                        storey=i,
+                        elevation_m=(floor_to_floor * i if floor_to_floor else None),
+                        seismic_base_share_kn=(shear if case.seismic_kpa > 0 else None),
+                        wind_shear_kn=(shear if case.wind_kpa > 0 else None),
+                        torsional_moment_knm=shear * params.accidental_torsion_ratio * plan_dim,
+                    )
+                )
+
+        return LateralDemand(
+            total_base_shear_kn=base_shear,
+            overturning_moment_knm=overturning,
+            accidental_torsion_eccentricity_m=params.accidental_torsion_ratio * plan_dim,
+            storey_forces=storey_forces,
+            envelope=DemandEnvelope(
+                governing_combination_id=(combo.combination_id if combo else None),
+                effects=ForceEffects(shear_major=base_shear, moment_major=overturning),
+                metadata={"component": "lateral", "governing_pressure_kpa": governing_pressure},
+            ),
+        )
+
+    def _build_torsional_demand(self, candidate: AssemblyCandidate, case: ResolvedLoadCase, params: DistributionParameters, lateral: LateralDemand | None) -> TorsionalDemand | None:
+        if lateral is None or lateral.total_base_shear_kn is None:
+            return None
+        plan_dim = max(params.span_x_m or 0.0, params.span_y_m or 0.0, 1.0)
+        ecc = params.accidental_torsion_ratio * plan_dim
+        return TorsionalDemand(
+            source="accidental_torsion",
+            design_eccentricity_m=ecc,
+            torsional_moment_knm=lateral.total_base_shear_kn * ecc,
+            metadata={"lateral_family_id": candidate.lateral_family_id},
+        )
+
+
+class StructuralLoadEngine:
+    """Facade used by AssemblyEvaluator for combination resolution and demand generation."""
+
+    def __init__(self, query: RepositoryQueryService):
+        self.query = query
+        self.combo_engine = LoadCombinationEngine(query)
+        self.distribution_engine = LoadDistributionEngine()
+
+    def build_analysis_input(self, *, project: ProjectContext, candidate: AssemblyCandidate) -> AssemblyAnalysisInput:
+        occupancy = self._resolve_occupancy(project)
+        resolved_case = self._resolve_load_case(project=project, occupancy=occupancy)
+        load_combinations = self.combo_engine.resolve_for_project(project=project, occupancy=occupancy)
+        return self.distribution_engine.build_analysis_input(
+            project=project,
+            candidate=candidate,
+            resolved_case=resolved_case,
+            load_combinations=load_combinations,
+        )
+
+    def _resolve_occupancy(self, project: ProjectContext) -> Occupancy:
+        occupancy_id = project.occupancy_id
+        if not occupancy_id and project.typology_id:
+            typology = self.query.get_typology(project.typology_id)
+            occupancy_id = typology.constraints.occupancy
+        if not occupancy_id:
+            raise LoadResolutionError("ProjectContext is missing occupancy_id and typology occupancy fallback.")
+        try:
+            return self.query.repo.occupancies[str(occupancy_id)]
+        except KeyError as exc:
+            raise LoadResolutionError(f"Unknown occupancy '{occupancy_id}'") from exc
+
+    def _resolve_load_case(self, *, project: ProjectContext, occupancy: Occupancy) -> ResolvedLoadCase:
+        row = dict(occupancy.metadata)
+        lv = occupancy.load_values
+        dead = self._pick_numeric(row, lv, ["dead_kpa", "dead_load_kpa", "sdl", "super_dead_kpa", "gk"]) or 0.0
+        live = self._pick_numeric(row, lv, ["live_kpa", "live_load_kpa", "ll", "qk"]) or 0.0
+        partition = self._pick_numeric(row, lv, ["partition_kpa", "partition_load_kpa", "partition", "partitions"]) or 0.0
+        roof_live = self._pick_numeric(row, lv, ["roof_live_kpa", "roof_live_load_kpa", "lr", "lr_kpa"]) or 0.0
+        snow = self._pick_numeric(row, lv, ["snow_kpa", "snow_load_kpa", "s", "s_kpa"]) or 0.0
+        rain = self._pick_numeric(row, lv, ["rain_kpa", "rain_load_kpa", "r", "r_kpa"]) or 0.0
+        wind = self._pick_numeric(row, lv, ["wind_kpa", "wind_pressure_kpa", "w", "w_kpa"]) or 0.0
+        seismic = self._pick_numeric(row, lv, ["seismic_kpa", "eq_kpa", "e", "e_kpa"]) or 0.0
+
+        dead += float(project.overrides.get("dead_kpa", 0.0) or 0.0)
+        live += float(project.overrides.get("live_kpa", 0.0) or 0.0)
+        partition += float(project.overrides.get("partition_kpa", 0.0) or 0.0)
+        wind = float(project.overrides.get("wind_kpa", wind) or 0.0)
+        seismic = float(project.overrides.get("seismic_kpa", seismic) or 0.0)
+
+        return ResolvedLoadCase(
+            occupancy_id=occupancy.occupancy_id,
+            dead_kpa=dead,
+            live_kpa=live,
+            partition_kpa=partition,
+            roof_live_kpa=roof_live,
+            snow_kpa=snow,
+            rain_kpa=rain,
+            wind_kpa=wind,
+            seismic_kpa=seismic,
+            metadata={"occupancy_description": occupancy.description},
+        )
+
+    def _pick_numeric(self, primary: dict[str, Any], secondary: dict[str, Any], keys: list[str]) -> float | None:
+        for key in keys:
+            for source in (primary, secondary):
+                if key not in source:
+                    continue
+                value = source.get(key)
+                try:
+                    if value is None or value == "":
+                        continue
+                    return float(value)
+                except Exception:
+                    continue
         return None
 
-    occ_col = pick_col(["occupancy", "load_case", "case", "space_type", "program", "use"])
-    sdl_col = pick_col(["sdl", "raw_sdl", "dead_load", "dl", "gk"])
-    ll_col  = pick_col(["ll", "raw_ll", "live_load", "imposed_load", "qk"])
 
-    if occ_col is None or sdl_col is None or ll_col is None:
-        raise ValueError(
-            "occupancies.csv must include occupancy + SDL + LL columns. "
-            f"Found columns: {list(occ_df.columns)}"
-        )
-
-    # Optional: explicit psi key column (otherwise infer as f'{occupancy}_EC')
-    psi_col = pick_col(["psi_key", "eurocode_key", "ec_key"])
-
-    occ_df[occ_col] = occ_df[occ_col].astype(str).str.strip()
-    occ_df[sdl_col] = pd.to_numeric(occ_df[sdl_col], errors="coerce").fillna(0.0)
-    occ_df[ll_col]  = pd.to_numeric(occ_df[ll_col], errors="coerce").fillna(0.0)
-
-    occ_lookup = {r[occ_col]: r for _, r in occ_df.iterrows()}
-
-    # Floor program mapping
-    floor_to_occ: Dict[int, str] = {}
-    if getattr(cf, "program", None):
-        floor_to_occ.update({int(k): str(v) for k, v in dict(cf.program).items()})
-
-    program_default = str(getattr(cf, "program_default", "office"))
-    num_floors = getattr(cf, "num_floors", None)
-    if num_floors is None:
-        # infer from program map / area map
-        if floor_to_occ:
-            num_floors = max(floor_to_occ.keys()) + 1
-        else:
-            area_map = getattr(cf, "area_per_floor", {}) or {}
-            num_floors = max(area_map.keys()) + 1 if area_map else 1
-
-    code_standard = str(getattr(cf, "code_standard", "Default"))
-    use_euro = "euro" in code_standard.lower()
-    combo_col = "EN1990_ULS" if use_euro else "ASCE7_LRFD"
-
-    rows: List[Dict[str, Any]] = []
-    floors_by_case: Dict[str, List[int]] = {}
-
-    max_raw_sdl = 0.0
-    max_raw_ll = 0.0
-    max_factored_sdl = 0.0
-    max_factored_ll = 0.0
-
-    for f in range(int(num_floors)):
-        occ_token = floor_to_occ.get(f, program_default)
-
-        resolved_key, strategy = resolve_occupancy_key(
-            occ_token,
-            occ_lookup,
-            unit=str(getattr(cf, "unit", "")),
-            code_standard=str(getattr(cf, "code_standard", "")),
-        )
-
-        if resolved_key != str(occ_token):
-            logger.info(f"[loads] Resolved occupancy '{occ_token}' -> '{resolved_key}' ({strategy})")
-
-        r = occ_lookup[resolved_key]
-        occ = resolved_key
-
-        raw_sdl = float(r[sdl_col])
-        raw_ll = float(r[ll_col])
-
-        floors_by_case.setdefault(str(occ), []).append(int(f))
-
-        # Determine Eurocode psi lookup key
-        psi_key, psi_strategy = resolve_psi_key(
-            occ,  # or occ_token, but use the resolved occupancy key you ended up with
-            load_values,
-            unit=str(getattr(cf, "unit", "")),
-            code_standard=str(getattr(cf, "code_standard", "")),
-        )
-
-        if psi_strategy != "direct_or_casefold":
-            logger.info(f"[loads] psi key resolved for '{occ}': {psi_key} ({psi_strategy})")
-
-        if use_euro:
-            combos = compute_en1990_uls_combos(raw_sdl, raw_ll, psi_key, load_values, load_combos)
-            gamma_g = float(get_by_path(load_values, "EN1990.gamma.ULS.G"))
-            gamma_q = float(get_by_path(load_values, "EN1990.gamma.ULS.Q"))
-        else:
-            combos = compute_asce7_lrfd_combos(raw_sdl, raw_ll, load_combos)
-            # For ASCE, gamma values are combo-dependent; leave None here
-            gamma_g = None
-            gamma_q = None
-
-        best = max(combos, key=lambda x: float(x.get("total", 0.0))) if combos else None
-        best_total = float(best["total"]) if best else float(raw_sdl + raw_ll)
-
-        # Maintain your legacy outputs
-        factored_sdl = (gamma_g * raw_sdl) if gamma_g is not None else raw_sdl
-        factored_ll  = (gamma_q * raw_ll)  if gamma_q is not None else raw_ll
-
-        rows.append({
-            "floor": int(f),
-            "occupancy": str(occ),
-            "SDL": raw_sdl,
-            "LL": raw_ll,
-            combo_col: combos,
-            "factored_sdl": float(factored_sdl),
-            "factored_ll": float(factored_ll),
-            "factored_total": float(best_total),
-            "combo": (best.get("name") if best else None),
-            "gamma_g": gamma_g,
-            "gamma_q": gamma_q,
-            "unit": str(getattr(cf, "unit", "metric")).strip().lower(),
-        })
-
-        max_raw_sdl = max(max_raw_sdl, raw_sdl)
-        max_raw_ll = max(max_raw_ll, raw_ll)
-        max_factored_sdl = max(max_factored_sdl, float(factored_sdl))
-        max_factored_ll = max(max_factored_ll, float(factored_ll))
-
-    loads_df_floor = pd.DataFrame(rows)
-
-    required_loads = {
-        "max_sdl": float(max_raw_sdl),
-        "max_ll": float(max_raw_ll),
-        "max_total": float(max_raw_sdl + max_raw_ll),
-        "max_factored_sdl": float(max_factored_sdl),
-        "max_factored_ll": float(max_factored_ll),
-        "max_factored_total": float(max_factored_sdl + max_factored_ll),
-    }
-
-    return required_loads, floors_by_case, loads_df_floor
+def build_load_engine(query: RepositoryQueryService) -> StructuralLoadEngine:
+    return StructuralLoadEngine(query)

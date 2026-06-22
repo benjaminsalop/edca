@@ -1,313 +1,257 @@
-# edca_code/scripts/core/carbon.py
 from __future__ import annotations
+
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, Tuple, List, Optional
-import pandas as pd
+from typing import Any, Iterable
+import csv
+import json
 import logging
 
-logger = logging.getLogger("carbon")
+from edca_code.scripts.core.design_results import AssemblyDesignResult, ComponentDesignResult
+from edca_code.scripts.core.exceptions import RepositoryError
 
-# -------------------------
-# Utilities
-# -------------------------
-def _safe_float(x: Any, default: float = 0.0) -> float:
-    """Convert x to float, returning default for None/NaN/unconvertible values."""
-    if x is None:
-        return float(default)
-    try:
-        if pd.isna(x):
-            return float(default)
-    except Exception:
-        # pd.isna may fail for some types; fall through to try/except
-        pass
-    try:
-        return float(x)
-    except Exception:
-        return float(default)
+logger = logging.getLogger(__name__)
 
-# -------------------------
-# Materials table loader
-# -------------------------
-def load_materials_table(path: str) -> pd.DataFrame:
-    """
-    Load materials properties table from CSV.
-    """
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"Materials CSV not found: {p}")
 
-    df = pd.read_csv(p, dtype={"material_id": str})
+@dataclass(slots=True)
+class MaterialRecord:
+    material_id: str
+    material_class: str | None = None
+    standard_or_grade: str | None = None
+    density: float | None = None
+    cost_per_kg: float | None = None
+    cost_per_m3: float | None = None
+    cost_per_m2: float | None = None
+    ec_per_kg: float | None = None
+    ec_per_m3: float | None = None
+    ec_per_m2: float | None = None
+    raw: dict[str, Any] | None = None
 
-    # minimal recommended set — we do not require all, but warn / raise if none of the A1-A3 columns exist
-    required_candidates = ["ec_a1a3_volumetric", "ec_a1a3_mass"]
-    if not any(c in df.columns for c in required_candidates):
-        raise ValueError(f"Materials CSV missing A1-A3 columns (expected one of {required_candidates}): {p}")
 
-    # ensure material_id present
-    if "material_id" not in df.columns:
-        raise ValueError(f"Materials CSV must contain 'material_id' column: {p}")
+@dataclass(slots=True)
+class BomLine:
+    category: str
+    material_id: str
+    quantity: float
+    unit: str
+    source: str | None = None
 
-    # Coerce common numeric columns to numeric where present
-    to_numeric_cols = [
-        "density",
-        "ec_a1a3_volumetric",
-        "ec_a1a3_mass",
-        "ec_a4_per_ton_km",
-        "transport_km",
-        "ec_a5_mass",
-        "cost_volumetric",
-        "cost_mass",]
-    for c in to_numeric_cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    df = df.set_index("material_id", drop=False)
+@dataclass(slots=True)
+class CarbonCostLine:
+    category: str
+    material_id: str
+    quantity: float
+    unit: str
+    embodied_carbon: float
+    cost: float
+    source: str | None = None
 
-    # warnings for missing but non-fatal columns
-    if "density" not in df.columns:
-        logger.warning("load_materials_table: 'density' column missing in materials table; volumetric<->mass conversions may fail.")
-    if "ec_a1a3_volumetric" not in df.columns and "ec_a1a3_mass" not in df.columns:
-        logger.warning("load_materials_table: no A1-A3 data present (volumetric or mass). Computations will be zero.")
-    return df
 
-# -------------------------
-# Material-specific helpers
-# -------------------------
-def material_a1a3_volumetric(material_row: pd.Series) -> float:
-    """
-    Return A1-A3 intensity as kgCO2e / m3.
-    Preference:
-      - ec_a1a3_volumetric (kgCO2e / m3)
-      - ec_a1a3_mass (kgCO2e / kg) * density (kg / m3)
-    Returns 0.0 if data insufficient.
-    """
-    if pd.notna(material_row.get("ec_a1a3_volumetric")):
-        return _safe_float(material_row["ec_a1a3_volumetric"])
-    if pd.notna(material_row.get("ec_a1a3_mass")) and pd.notna(material_row.get("density")):
-        return _safe_float(material_row["ec_a1a3_mass"]) * _safe_float(material_row["density"])
-    logger.warning(
-        "material_a1a3_volumetric: missing ec_a1a3_volumetric and/or density for material_id=%s",
-        material_row.get("material_id", "(unknown)"),)
-    return 0.0
+class MaterialsTable:
+    def __init__(self, records: dict[str, MaterialRecord]) -> None:
+        self.records = records
 
-# -------------------------
-# Core assembly carbon computation
-# -------------------------
-def compute_assembly_carbon_from_bom(
-    bom: Dict[str, float],
-    materials_df: pd.DataFrame,
-    include_a4_a5: bool = True,
-    default_transport_km: float = 50.0) -> Dict[str, Any]:
-    """
-    Compute carbon for an assembly BOM.
-    Parameters:
-      - bom: dict mapping 'category:material_id' -> quantity
-          e.g., 'concrete:material_001' -> 2.5  (m3)
-                'steel_kg:material_002' -> 150.0 (kg)
-      - materials_df: DataFrame loaded from materials CSV
-      - include_a4_a5: if True, include transport (A4) and end-of-life (A5) impacts
-      - default_transport_km: used if material row transport_km is missing
-    Returns:
-      { "per_material": [ ... ], "totals": {...} }
-    """
-    if not isinstance(bom, dict):
-        raise TypeError("BOM must be a dict mapping 'category:material_id' -> quantity")
-
-    per_material: List[Dict[str, Any]] = []
-    total_a1a3 = 0.0
-    total_a4 = 0.0
-    total_a5 = 0.0
-    total_cost = 0.0
-
-    for key, raw_qty in bom.items():
-        if ":" not in key:
-            logger.debug("Skipping BOM key without category: %s", key)
-            continue
-        category, mat_id = key.split(":", 1)
-        qty = _safe_float(raw_qty, default=0.0)
-
-        # lookup material row (defensive)
-        mat_row: Optional[pd.Series]
+    def get(self, material_id: str) -> MaterialRecord:
         try:
-            mat_row = materials_df.loc[mat_id]
-        except Exception:
-            mat_row = None
+            return self.records[material_id]
+        except KeyError as exc:
+            raise RepositoryError(f"Unknown material_id '{material_id}'") from exc
 
-        if mat_row is None:
-            logger.warning("Material id '%s' not found in materials table; treating quantities as zero-impact for now", mat_id)
-            per_material.append({
-                "material_id": mat_id,
-                "category": category,
-                "qty_m3": 0.0,
-                "qty_kg": 0.0,
-                "a1a3": 0.0,
-                "a4": 0.0,
-                "a5": 0.0,
-                "total": 0.0,
-                "cost": 0.0,})
-            continue
-
-        density = _safe_float(mat_row.get("density", 0.0))
-
-        # interpret quantities
-        qty_m3 = 0.0
-        qty_kg = 0.0
-        if category in ("concrete", "timber", "steel_m3"):
-            qty_m3 = qty
-            qty_kg = qty_m3 * density if density > 0.0 else 0.0
-        elif category == "steel_kg":
-            qty_kg = qty
-            qty_m3 = (qty_kg / density) if density > 0.0 else 0.0
+    @classmethod
+    def from_csv(cls, path: str | Path) -> "MaterialsTable":
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Materials file not found: {path}")
+        rows: list[dict] = []
+        if path.suffix.lower() == ".parquet":
+            import pandas as pd
+            df = pd.read_parquet(path)
+            rows = df.where(df.notna(), other=None).to_dict(orient="records")
         else:
-            # default assumption: volumetric
-            qty_m3 = qty
-            qty_kg = qty_m3 * density if density > 0.0 else 0.0
+            for enc in ("utf-8-sig", "latin-1", "cp1252"):
+                try:
+                    with path.open("r", encoding=enc, newline="") as handle:
+                        rows = list(csv.DictReader(handle))
+                    break
+                except UnicodeDecodeError:
+                    continue
+        _LB_FT3_TO_KG_M3 = 16.01846
 
-        # A1-A3
-        a1a3_volumetric = material_a1a3_volumetric(mat_row)
-        a1a3 = a1a3_volumetric * qty_m3
+        records: dict[str, MaterialRecord] = {}
+        for row in rows:
+            material_id = str(row.get("material_id") or "").strip()
+            if not material_id:
+                continue
+            density = _as_float(row.get("density"))
+            if density is not None and str(row.get("unit") or "").strip().lower() == "imperial":
+                density = density * _LB_FT3_TO_KG_M3
+            records[material_id] = MaterialRecord(
+                material_id=material_id,
+                material_class=_clean_str(row.get("material_class")),
+                standard_or_grade=_clean_str(row.get("standard_or_grade")),
+                density=density,
+                cost_per_kg=_first_float(row, ["cost_per_kg", "cost_mass"]),
+                cost_per_m3=_first_float(row, ["cost_per_m3", "cost_volumetric"]),
+                cost_per_m2=_first_float(row, ["cost_per_m2", "cost_areal"]),
+                ec_per_kg=_first_float(row, ["ec_per_kg", "ec_a1a3_mass"]),
+                ec_per_m3=_first_float(row, ["ec_per_m3", "ec_a1a3_volumetric"]),
+                ec_per_m2=_first_float(row, ["ec_per_m2", "ec_a1a3_areal"]),
+                raw=dict(row),
+            )
+        return cls(records)
 
-        # A4 transport
-        a4 = 0.0
-        if include_a4_a5:
-            a4_per_ton_km = _safe_float(mat_row.get("ec_a4_per_ton_km", 0.0))
-            transport_km = _safe_float(mat_row.get("transport_km", default_transport_km))
-            tonnes = qty_kg / 1000.0 if qty_kg > 0.0 else 0.0
-            a4 = a4_per_ton_km * tonnes * transport_km
 
-        # A5 end-of-life (mass-based)
-        a5 = 0.0
-        if include_a4_a5:
-            a5_mass = _safe_float(mat_row.get("ec_a5_mass", 0.0))
-            a5 = a5_mass * qty_kg
+class CarbonCostEngine:
+    def __init__(self, materials: MaterialsTable) -> None:
+        self.materials = materials
 
-        # cost (prefer volumetric price)
-        cost = 0.0
-        if pd.notna(mat_row.get("cost_volumetric")):
-            cost = _safe_float(mat_row.get("cost_volumetric")) * qty_m3
-        elif pd.notna(mat_row.get("cost_mass")):
-            cost = _safe_float(mat_row.get("cost_mass")) * qty_kg
+    def evaluate_bom(self, bom: Iterable[BomLine]) -> list[CarbonCostLine]:
+        lines: list[CarbonCostLine] = []
+        for line in bom:
+            try:
+                record = self.materials.get(line.material_id)
+            except RepositoryError:
+                logger.debug("Unknown material_id '%s' — skipping BOM line (category=%s)",
+                             line.material_id, line.category)
+                continue
+            try:
+                embodied_carbon = self._evaluate_intensity(record, line.quantity, line.unit, kind="carbon")
+                cost = self._evaluate_intensity(record, line.quantity, line.unit, kind="cost")
+            except RepositoryError as exc:
+                logger.debug("Cannot evaluate intensity for material '%s': %s", line.material_id, exc)
+                continue
+            lines.append(
+                CarbonCostLine(
+                    category=line.category,
+                    material_id=line.material_id,
+                    quantity=line.quantity,
+                    unit=line.unit,
+                    embodied_carbon=embodied_carbon,
+                    cost=cost,
+                    source=line.source,
+                )
+            )
+        return lines
 
-        total = float(a1a3) + float(a4) + float(a5)
+    def evaluate_component(self, result: ComponentDesignResult) -> list[CarbonCostLine]:
+        return self.evaluate_bom(_extract_bom_lines(result))
 
-        per_material.append({
-            "material_id": mat_id,
-            "category": category,
-            "qty_m3": float(qty_m3),
-            "qty_kg": float(qty_kg),
-            "a1a3": float(a1a3),
-            "a4": float(a4),
-            "a5": float(a5),
-            "total": float(total),
-            "cost": float(cost),})
-
-        total_a1a3 += float(a1a3)
-        total_a4 += float(a4)
-        total_a5 += float(a5)
-        total_cost += float(cost)
-
-    # --- breakdown totals (useful for keeping carbon separate by material / category)
-    # Normalise categories so the downstream tables can have stable column names.
-    # e.g. steel_kg + steel_m3 -> steel
-    totals_by_category: Dict[str, float] = {}
-    totals_by_material_id: Dict[str, float] = {}
-
-    for row in per_material:
-        cat_raw = str(row.get("category", "") or "")
-        cat = "steel" if cat_raw.startswith("steel") else cat_raw  # steel_kg / steel_m3 -> steel
-        mat_id = str(row.get("material_id", "") or "")
-        tot = _safe_float(row.get("total", 0.0))
-
-        if cat:
-            totals_by_category[cat] = totals_by_category.get(cat, 0.0) + tot
-        if mat_id:
-            totals_by_material_id[mat_id] = totals_by_material_id.get(mat_id, 0.0) + tot
-
-    overall_total = float(total_a1a3 + (total_a4 if include_a4_a5 else 0.0) + (total_a5 if include_a4_a5 else 0.0))
-
-    totals = {
-        "total_a1a3": float(total_a1a3),
-        "total_a4": float(total_a4),
-        "total_a5": float(total_a5),
-        "total": overall_total,
-        "total_cost": float(total_cost),}
-
-    return {
-        "per_material": per_material,
-        "totals": totals,
-        "totals_by_category": totals_by_category,
-        "totals_by_material_id": totals_by_material_id,
+    def evaluate_assembly(self, result: AssemblyDesignResult) -> tuple[list[CarbonCostLine], dict[str, float]]:
+        bom: list[BomLine] = []
+        for component in result.component_results:
+            bom.extend(_extract_bom_lines(component))
+        lines = self.evaluate_bom(bom)
+        totals = {
+            "carbon_total": sum(line.embodied_carbon for line in lines),
+            "cost_total": sum(line.cost for line in lines),
         }
+        return lines, totals
 
-# -------------------------
-# Convenience wrapper
-# -------------------------
-# convenience: allow reuse of loaded materials_df to avoid repeated CSV I/O
-def assembly_carbon_for_floor(
-    bom_floor: Dict[str, float],
-    materials_csv: Optional[str] = None,
-    materials_df: Optional[pd.DataFrame] = None,
-    include_a4_a5: bool = True,
-    default_transport_km: float = 50.0,
-) -> Dict[str, Any]:
-    """
-    Compute carbon for a single floor BOM.
-    Either provide materials_csv (path) OR materials_df (already loaded DataFrame).
-    If both are provided, materials_df is used.
-    """
-    if materials_df is None:
-        if materials_csv is None:
-            raise ValueError("Either materials_csv or materials_df must be provided")
-        materials_df = load_materials_table(materials_csv)
-    return compute_assembly_carbon_from_bom(bom_floor, materials_df, include_a4_a5, default_transport_km)
+    def _evaluate_intensity(self, record: MaterialRecord, quantity: float, unit: str, *, kind: str) -> float:
+        if quantity == 0:
+            return 0.0
+        if kind == "carbon":
+            per_kg = record.ec_per_kg
+            per_m3 = record.ec_per_m3
+            per_m2 = record.ec_per_m2
+        else:
+            per_kg = record.cost_per_kg
+            per_m3 = record.cost_per_m3
+            per_m2 = record.cost_per_m2
+
+        unit_norm = unit.strip().lower()
+        if unit_norm in {"kg", "kilogram", "kilograms"}:
+            if per_kg is None:
+                raise RepositoryError(f"Material '{record.material_id}' missing per-kg {kind} intensity")
+            return quantity * per_kg
+        if unit_norm in {"m3", "cubic_meter", "cubic_metre"}:
+            if per_m3 is not None:
+                return quantity * per_m3
+            # Fallback: convert m³ → kg via density, then apply per-kg intensity.
+            if per_kg is not None and record.density is not None:
+                return quantity * record.density * per_kg
+            raise RepositoryError(
+                f"Material '{record.material_id}' has no per-m3 {kind} intensity "
+                f"and cannot auto-convert (missing density or per-kg intensity)"
+            )
+        if unit_norm in {"m2", "square_meter", "square_metre"}:
+            if per_m2 is None:
+                raise RepositoryError(f"Material '{record.material_id}' missing per-m2 {kind} intensity")
+            return quantity * per_m2
+        raise RepositoryError(f"Unsupported BOM unit '{unit}' for material '{record.material_id}'")
 
 
-def assembly_carbon_for_building(
-    floor_boms: Dict[int, Dict[str, float]],
-    materials_csv: Optional[str] = None,
-    materials_df: Optional[pd.DataFrame] = None,
-    include_a4_a5: bool = True,
-    default_transport_km: float = 50.0,
-    return_dataframe: bool = False,
-) -> Dict[int, Dict[str, Any]] | pd.DataFrame:
-    """
-    Compute carbon for multiple floors.
-    """
-    if materials_df is None:
-        if materials_csv is None:
-            raise ValueError("Either materials_csv or materials_df must be provided")
-        materials_df = load_materials_table(materials_csv)
+def assembly_result_to_summary_row(result: AssemblyDesignResult, totals: dict[str, float]) -> dict[str, Any]:
+    return {
+        "candidate_id": result.candidate_id,
+        "pass_overall": result.pass_overall,
+        "governing_utilization": result.governing_utilization,
+        "governing_limit_state": result.governing_limit_state,
+        "carbon_total": totals.get("carbon_total", 0.0),
+        "cost_total": totals.get("cost_total", 0.0),
+        "warnings": len(result.warnings),
+    }
 
-    results: Dict[int, Dict[str, Any]] = {}
-    rows = []
-    for floor, bom in floor_boms.items():
-        res = compute_assembly_carbon_from_bom(bom, materials_df, include_a4_a5, default_transport_km)
-        results[int(floor)] = res
-        if return_dataframe:
-            # flatten per_material into rows with floor annotated
-            for pm in res["per_material"]:
-                row = {
-                    "floor": int(floor),
-                    "material_id": pm["material_id"],
-                    "category": pm["category"],
-                    "qty_m3": pm["qty_m3"],
-                    "qty_kg": pm["qty_kg"],
-                    "a1a3": pm["a1a3"],
-                    "a4": pm["a4"],
-                    "a5": pm["a5"],
-                    "total": pm["total"],
-                    "cost": pm["cost"],
-                }
-                rows.append(row)
 
-    if return_dataframe:
-        df = pd.DataFrame(rows)
-        # you may also add aggregated totals per floor if desired:
-        totals_rows = []
-        for floor, res in results.items():
-            t = res["totals"]
-            totals_rows.append({"floor": int(floor), **t})
-        totals_df = pd.DataFrame(totals_rows)
-        return {"per_material_df": df, "totals_df": totals_df}
-    return results
+def write_carbon_cost_report(
+    result: AssemblyDesignResult,
+    lines: list[CarbonCostLine],
+    totals: dict[str, float],
+    out_dir: str | Path,
+) -> tuple[Path, Path]:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    lines_path = out_dir / f"{result.candidate_id}_carbon_cost_lines.json"
+    summary_path = out_dir / f"{result.candidate_id}_carbon_cost_summary.json"
+    with lines_path.open("w", encoding="utf-8") as handle:
+        json.dump([line.__dict__ for line in lines], handle, indent=2)
+    with summary_path.open("w", encoding="utf-8") as handle:
+        json.dump(assembly_result_to_summary_row(result, totals), handle, indent=2)
+    return lines_path, summary_path
 
+
+def _extract_bom_lines(result: ComponentDesignResult) -> list[BomLine]:
+    bom = result.takeoff or {}
+    lines: list[BomLine] = []
+    for item in bom.get("lines", []):
+        material_id = str(item.get("material_id") or "").strip()
+        if not material_id:
+            continue
+        lines.append(
+            BomLine(
+                category=str(item.get("category") or result.component_type),
+                material_id=material_id,
+                quantity=float(item.get("quantity") or 0.0),
+                unit=str(item.get("unit") or "kg"),
+                source=result.component_id,
+            )
+        )
+    return lines
+
+
+def _clean_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _first_float(row: dict[str, Any], keys: list[str]) -> float | None:
+    for key in keys:
+        value = _as_float(row.get(key))
+        if value is not None:
+            return value
+    return None

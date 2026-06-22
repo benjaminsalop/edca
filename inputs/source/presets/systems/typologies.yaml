@@ -10,37 +10,117 @@
 # This will return the dictionary of defaults, constraints, and preferences for that typology.
 # Users can then use this information to guide their design selections and analyses.
 
-
 meta:
   dataset: typologies
-  version: 0.1
+  version: 0.2
   description: >-
-    Typologies describe structural intent and default selections.
-    They reference IDs in materials and systems catalogs.
+    Typologies describe project-level structural intent, default system family
+    selections, broad geometric/loading expectations, and ranking priorities.
+    They reference family IDs in the systems catalogs and IDs in materials catalogs.
 
 typologies:
-  # Example typology
   midrise_concrete_residential:
-    description: "Concrete frame with flat slab / cores; residential loading."
+    description: "Concrete-framed residential building with moderate spans and apartment loading."
     defaults:
-      # IDs from your materials + material_sets
       material_set: uk_default_2025
-      # IDs from systems (family ids, not variant ids)
       floor_system_family: flat_slab
+      primary_beam_system_family: rc_downstand_beam
+      secondary_beam_system_family: null
+      column_system_family: rc_rectangular_column
       lateral_system_family: rc_core
-      foundation_system_family: pad_footings
     constraints:
-      max_story_count: 12
-      spans_m:
-        typical: [6, 9]
+      occupancy: residential
+      allowed_material_families: [concrete, hybrid]
+      max_storey_count: 12
+      span_x_m: [5.5, 8.5]
+      span_y_m: [5.5, 8.5]
+      floor_to_floor_m: [3.0, 3.5]
     preferences:
-      rank_by: [embodied_carbon, cost, depth]
+      rank_by: [embodied_carbon, cost, depth_overall]
+      prefer_beamless: true
+      prefer_cip: true
+      prefer_simple_load_paths: true
 
-  industrial_steel_warehouse:
-    description: "Steel portal/frames with metal deck."
+  commercial_office_steel:
+    description: "Steel-framed office building with long spans and shallow floor preference."
     defaults:
       material_set: uk_default_2025
       floor_system_family: composite_deck
-      lateral_system_family: braced_frame
+      primary_beam_system_family: steel_ub_composite
+      secondary_beam_system_family: steel_secondary_beam
+      column_system_family: steel_uc_column
+      lateral_system_family: steel_braced_frame
     constraints:
-      max_story_count: 2
+      occupancy: office
+      allowed_material_families: [steel, hybrid]
+      max_storey_count: 20
+      span_x_m: [7.5, 12.0]
+      span_y_m: [7.5, 12.0]
+      floor_to_floor_m: [3.6, 4.5]
+    preferences:
+      rank_by: [cost, depth_overall, embodied_carbon]
+      prefer_long_spans: true
+      prefer_dry_construction: true
+
+  industrial_steel_warehouse:
+    description: "Industrial building with steel framing and long-span roof/floor framing."
+    defaults:
+      material_set: uk_default_2025
+      floor_system_family: composite_deck
+      primary_beam_system_family: steel_cellular_beam
+      secondary_beam_system_family: steel_secondary_beam
+      column_system_family: steel_uc_column
+      lateral_system_family: steel_braced_frame
+    constraints:
+      occupancy: industrial
+      allowed_material_families: [steel, hybrid]
+      max_storey_count: 2
+      span_x_m: [10.0, 18.0]
+      span_y_m: [10.0, 18.0]
+      floor_to_floor_m: [5.0, 9.0]
+    preferences:
+      rank_by: [cost, embodied_carbon]
+      prefer_long_spans: true
+      prefer_simple_repetition: true
+
+  education_hybrid_lowrise:
+    description: "Low-rise education building allowing hybrid timber/steel/concrete solutions."
+    defaults:
+      material_set: uk_default_2025
+      floor_system_family: clt_floor
+      primary_beam_system_family: glulam_beam
+      secondary_beam_system_family: glulam_beam
+      column_system_family: steel_uc_column
+      lateral_system_family: rc_core
+    constraints:
+      occupancy: education
+      allowed_material_families: [timber, steel, concrete, hybrid]
+      max_storey_count: 6
+      span_x_m: [6.0, 9.0]
+      span_y_m: [6.0, 9.0]
+      floor_to_floor_m: [3.3, 4.2]
+    preferences:
+      rank_by: [embodied_carbon, depth_overall, cost]
+      prefer_hybrid_systems: true
+      prefer_exposed_timber: true
+
+  healthcare_concrete_midrise:
+    description: "Concrete or hybrid healthcare/lab-adjacent building with conservative serviceability preferences."
+    defaults:
+      material_set: uk_default_2025
+      floor_system_family: ec_pt_flatplate_250
+      primary_beam_system_family: rc_downstand_beam
+      secondary_beam_system_family: null
+      column_system_family: rc_rectangular_column
+      lateral_system_family: rc_core
+    constraints:
+      occupancy: healthcare
+      allowed_material_families: [concrete, hybrid]
+      max_storey_count: 15
+      span_x_m: [6.0, 10.0]
+      span_y_m: [6.0, 10.0]
+      floor_to_floor_m: [3.8, 4.8]
+    preferences:
+      rank_by: [depth_overall, embodied_carbon, cost]
+      prefer_stiff_systems: true
+      prefer_beamless: false

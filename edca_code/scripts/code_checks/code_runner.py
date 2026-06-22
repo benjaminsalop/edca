@@ -1,130 +1,121 @@
-import logging
-from pathlib import Path
+from __future__ import annotations
+
 import json
-import pandas as pd
-from typing import Any
+import logging
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
+from typing import Any, Iterable, List, Optional
+
+from edca_code.scripts.code_checks.code_checks import (
+    run_building_code_check,
+    run_code_checks_on_candidates,
+    run_code_checks_on_components,
+)
+from edca_code.scripts.code_checks.design_inputs import BuildingSystemDesignInput, ComponentDesignInput
+from edca_code.scripts.core.design_results import ComponentDesignResult
 
 logger = logging.getLogger("code_checks")
 
 
-def run_code_checks_if_requested(candidates_df, out_dir, run_flag, **kwargs):
-    if not run_flag:
-        return pd.DataFrame()
+def _ensure_dir(path: str | Path) -> Path:
+    out = Path(path)
+    out.mkdir(parents=True, exist_ok=True)
+    return out
 
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Locate the code_checks entrypoint
-    try:
-        from edca_code.scripts.code_checks import code_checks  # preferred location
-    except Exception:
-        try:
-            from edca_code.scripts.code_checks import code_checks  # fallback
-        except Exception:
-            logger.warning("[codechecks] requested but no code_checks module found; skipping.")
-            return pd.DataFrame()
-
-    # Run checks
-    try:
-        if hasattr(code_checks, "run_code_checks_on_candidates"):
-            # Pull known kwargs (and accept common aliases)
-            material_csv_path = (
-                kwargs.get("material_csv_path")
-                or kwargs.get("materials")
-                or kwargs.get("materials_path")
-                or kwargs.get("materials_csv")
-            )
-            load_combos_yaml = kwargs.get("load_combos_yaml")
-            load_values_yaml = kwargs.get("load_values_yaml")
-
-            # Optional debug passthrough: dump the inputs used by the checker
-            debug_inputs = bool(
-                kwargs.get("debug_inputs")
-                or kwargs.get("codechecks_debug_inputs")
-                or kwargs.get("codechecks_debug")
-            )
-            debug_only_on_fail = bool(
-                kwargs.get("debug_only_on_fail", True)
-                if "debug_only_on_fail" in kwargs
-                else kwargs.get("codechecks_debug_only_on_fail", True)
-            )
-            debug_max_rows = int(kwargs.get("debug_max_rows", kwargs.get("codechecks_debug_max_rows", 50)) or 50)
-
-            results: Any = code_checks.run_code_checks_on_candidates(
-                candidates_df,
-                material_csv_path=material_csv_path,
-                load_combos_yaml=load_combos_yaml,
-                load_values_yaml=load_values_yaml,
-                debug_inputs=debug_inputs,
-                debug_only_on_fail=debug_only_on_fail,
-                debug_max_rows=debug_max_rows,
-            )
-        elif hasattr(code_checks, "run"):
-            results = code_checks.run(candidates_df)
+def _serialize_results(results: Iterable[ComponentDesignResult]) -> List[dict[str, Any]]:
+    payload: List[dict[str, Any]] = []
+    for result in results:
+        if hasattr(result, "to_dict"):
+            payload.append(result.to_dict())
+        elif is_dataclass(result):
+            payload.append(asdict(result))
         else:
-            logger.warning("[codechecks] module found but no runnable entrypoint; skipping.")
-            return pd.DataFrame()
-    except Exception:
-        logger.exception("[codechecks] Error running code checks; skipping")
-        return pd.DataFrame()
+            payload.append(getattr(result, "__dict__", {"result": str(result)}))
+    return payload
 
-    # Normalize results into list-of-dicts
-    if results is None:
-        logger.warning("[codechecks] code checks returned None; skipping")
-        return pd.DataFrame()
-    if isinstance(results, dict):
-        results = [results]
-    if not isinstance(results, (list, tuple)):
-        logger.warning("[codechecks] unexpected results type: %s; skipping", type(results).__name__)
-        return pd.DataFrame()
 
-    verbose_lines = []
-    num_success = 0
-    num_fail = 0
+def _records_from_legacy_input(value: Any) -> tuple[list[dict[str, Any]] | None, bool]:
+    if value is None:
+        return None, False
+    if hasattr(value, "to_dict") and hasattr(value, "columns"):
+        return value.to_dict(orient="records"), True
+    if isinstance(value, dict):
+        return [value], True
+    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+        return value, True
+    return None, False
 
-    for r in results:
-        if not isinstance(r, dict):
-            # keep something rather than crashing
-            r = {"success": False, "error": f"non-dict result: {type(r).__name__}", "raw": str(r)}
 
-        succ = bool(r.get("success", False))
-        num_success += int(succ)
-        num_fail += int(not succ)
+def _results_to_legacy_dataframe(
+    records: list[dict[str, Any]],
+    results: Iterable[ComponentDesignResult],
+):
+    import pandas as pd
 
-        try:
-            verbose_lines.append(json.dumps(r, default=str))
-        except Exception:
-            verbose_lines.append(json.dumps({"success": False, "error": "json serialize failed", "raw": str(r)}))
+    rows: list[dict[str, Any]] = []
+    for record, result in zip(records, results):
+        checks = getattr(result, "checks", []) or []
+        warnings = getattr(result, "warnings", []) or []
+        rows.append(
+            {
+                "system_variant": record.get("system_variant") or record.get("variant_id") or getattr(result, "variant_id", None),
+                "codecheck_component": getattr(result, "component", None),
+                "codecheck_family": getattr(result, "family_id", None),
+                "codecheck_variant": getattr(result, "variant_id", None),
+                "codecheck_passed": bool(getattr(result, "passed", False)),
+                "codecheck_utilization_max": getattr(result, "utilization_max", None),
+                "codecheck_n_checks": len(checks),
+                "codecheck_n_warnings": len(warnings),
+                "codecheck_warnings": json.dumps([asdict(w) if is_dataclass(w) else str(w) for w in warnings]),
+                "codecheck_details_json": json.dumps(asdict(result) if is_dataclass(result) else getattr(result, "__dict__", {}), default=str),
+            }
+        )
+    return pd.DataFrame(rows)
 
-    # Write verbose output
-    verbose_path = out_dir / "codechecks_verbose.txt"
-    try:
-        with verbose_path.open("w", encoding="utf-8") as vf:
-            vf.write("Code checks verbose report\n")
-            vf.write(f"Success: {num_success}\n")
-            vf.write(f"Fail: {num_fail}\n")
-            vf.write(f"Total: {len(results)}\n\n")
-            vf.write("\n".join(verbose_lines))
-            vf.write("\n")
-        logger.info("[codechecks] Wrote verbose code checks report to %s", verbose_path)
-    except Exception:
-        logger.exception("[codechecks] Failed to write codechecks_verbose.txt")
 
-    logger.info(
-        "[codechecks] Code checks completed: success=%d, fail=%d, total=%d",
-        num_success, num_fail, len(results)
-    )
+def run_code_checks_if_requested(
+    components_or_candidates: Optional[Iterable[Any]] = None,
+    out_dir: str | Path = ".",
+    run_flag: bool = False,
+    *,
+    candidates_df: Any = None,
+    building_input: Optional[BuildingSystemDesignInput] = None,
+    use_legacy_candidate_wrapper: bool = False,
+    **kwargs: Any,
+) -> Any:
+    if not run_flag:
+        return []
 
-    # Convert to DataFrame for merge
-    df_results = pd.DataFrame(results)
-    if df_results.empty:
-        logger.warning("[codechecks] results DataFrame is empty; skipping merge output")
-        return pd.DataFrame()
-    if "system_variant" not in df_results.columns:
-        logger.warning("[codechecks] results missing system_variant; cannot merge into candidates")
-        return pd.DataFrame()
+    out = _ensure_dir(out_dir)
 
-    # Make sure system_variant is string for merges
-    df_results["system_variant"] = df_results["system_variant"].astype(str)
+    source = candidates_df if candidates_df is not None else components_or_candidates
+    legacy_records, is_legacy = _records_from_legacy_input(source)
 
-    return df_results
+    if use_legacy_candidate_wrapper or is_legacy:
+        records = legacy_records if legacy_records is not None else list(source or [])
+        results = run_code_checks_on_candidates(records, **kwargs)
+    else:
+        results = run_code_checks_on_components(source or [], **kwargs)
+
+    with (out / "component_code_checks.json").open("w", encoding="utf-8") as fh:
+        json.dump(_serialize_results(results), fh, indent=2)
+
+    if building_input is not None:
+        building_check = run_building_code_check(building_input, **kwargs)
+        if building_check is not None:
+            with (out / "building_code_check.json").open("w", encoding="utf-8") as fh:
+                json.dump(
+                    building_check.to_dict()
+                    if hasattr(building_check, "to_dict")
+                    else asdict(building_check)
+                    if is_dataclass(building_check)
+                    else getattr(building_check, "__dict__", {}),
+                    fh,
+                    indent=2,
+                )
+
+    if is_legacy and legacy_records is not None:
+        return _results_to_legacy_dataframe(legacy_records, results)
+
+    return results

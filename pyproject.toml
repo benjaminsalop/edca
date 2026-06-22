@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "edca-code"
-version = "0.1.0"
+version = "0.3.0"
 description = "Early Design Carbon Assessment Tool"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -18,7 +18,8 @@ dependencies = [
     "pandas",
     "pyyaml",
     "pydantic",
-    "pyarrow"
+    "pyarrow",
+    "matplotlib"
 ]
 
 [project.scripts]

@@ -4,32 +4,88 @@
 
 meta:
   dataset: system_types
-  version: 0.1
+  version: 0.2
   description: >-
-    Taxonomy for systems catalogs: categories, components, and type aliases.
-    Use this to keep naming consistent across CSVs.
+    Taxonomy for systems catalogs: components, material families, type families,
+    and aliases. Use this to keep naming consistent across CSVs and YAML rules.
 
 components:
   - floor
-  - roof
   - beam
   - column
-  - wall
-  - foundation
+  - lateral
 
-categories:
-  precast:
-    types: [hollowcore, solid_plank, double_tee, beam_block, plank, solid_plank]
-  steel:
-    types: [composite_deck, metal_deck]
-  concrete:
-    types: [flat_slab, pt_slab, beam_slab]
-  timber:
-    types: [lvl_joist, lvl_panel, clt_floor, glulam_beam]
+material_families:
+  - precast
+  - concrete
+  - steel
+  - timber
+  - hybrid
+
+types:
+  floor:
+    precast:
+      - hollowcore
+      - solid_plank
+      - double_tee
+      - beam_block
+      - plank
+    concrete:
+      - flat_slab
+      - pt_slab
+      - beam_slab
+    steel:
+      - composite_deck
+      - metal_deck
+    timber:
+      - clt_floor
+      - lvl_panel
+      - lvl_joist
+
+  beam:
+    concrete:
+      - rc_downstand_beam
+      - precast_rc_beam
+      - pt_beam
+    steel:
+      - steel_ub_composite
+      - steel_secondary_beam
+      - steel_cellular_beam
+    timber:
+      - glulam_beam
+      - lvl_beam
+
+  column:
+    concrete:
+      - rc_rectangular_column
+      - precast_rc_column
+      - rc_circular_column
+    steel:
+      - steel_uc_column
+      - steel_chs_column
+    timber:
+      - glulam_column
+      - timber_post
+
+  lateral:
+    concrete:
+      - rc_core
+      - rc_shear_wall
+    steel:
+      - steel_braced_frame
+      - steel_moment_frame
+    timber:
+      - timber_core
+      - timber_braced_frame
+    hybrid:
+      - hybrid_core
 
 aliases:
-  # If your CSV uses multiple labels for the same thing
   hollow_core: hollowcore
   flat_plate: flat_slab
-  clt_floor: 
   cast_slab: flat_slab
+  clt_panel: clt_floor
+  metaldeck: metal_deck
+  uc_column: steel_uc_column
+  ub_composite: steel_ub_composite
+  braced_frame: steel_braced_frame

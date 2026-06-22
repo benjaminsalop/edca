@@ -1,0 +1,24 @@
+name: occupancies
+description: Auto-generated schema for occupancies on 2026-06-04T07:57:29.918020+00:00
+columns:
+- name: use
+  type: string
+  units: null
+- name: unit
+  type: string
+  units: null
+- name: sdl
+  type: number
+  units: null
+- name: sdl_partition
+  type: integer
+  units: null
+- name: ll
+  type: number
+  units: null
+- name: code
+  type: string
+  units: null
+- name: notes
+  type: string
+  units: null

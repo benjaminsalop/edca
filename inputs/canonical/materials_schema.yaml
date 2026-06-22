@@ -1,48 +1,63 @@
 name: materials
+description: Auto-generated schema for materials on 2026-06-04T07:57:29.910196+00:00
 columns:
-  material_id:
-    type: string
-    units: ''
-  family:
-    type: string
-    units: ''
-  standard_grade:
-    type: number
-    units: ''
-  concrete_f_ck:
-    type: number
-    units: ''
-  steel_fy:
-    type: number
-    units: ''
-  steel_fu:
-    type: number
-    units: ''
-  density:
-    type: number
-    units: ''
-  unit:
-    type: string
-    units: ''
-  ec_a1a3_volumetric:
-    type: number
-    units: ''
-  ec_a1a3_mass:
-    type: number
-    units: ''
-  ec_a4_ton_km:
-    type: number
-    units: ''
-  transport_distance:
-    type: number
-    units: ''
-  ec_a5_mass:
-    type: number
-    units: ''
-  cost_volume:
-    type: number
-    units: ''
-  cost_mass:
-    type: number
-    units: ''
-notes: Auto-generated basic schema. Please add units & refine types.
+- name: material_id
+  type: string
+  units: null
+- name: family
+  type: string
+  units: null
+- name: standard_grade
+  type: string
+  units: null
+- name: concrete_f_ck
+  type: number
+  units: null
+- name: steel_fy
+  type: number
+  units: null
+- name: steel_fu
+  type: number
+  units: null
+- name: timber_fm
+  type: number
+  units: null
+- name: timber_e
+  type: integer
+  units: null
+- name: density
+  type: number
+  units: null
+- name: unit
+  type: string
+  units: null
+- name: ec_a1a3_volumetric
+  type: number
+  units: null
+- name: ec_a1a3_mass
+  type: number
+  units: null
+- name: ec_a4_ton_km
+  type: number
+  units: null
+- name: transport_distance
+  type: integer
+  units: null
+- name: ec_a4_volumetric
+  type: number
+  units: null
+- name: ec_a4_mass
+  type: number
+  units: null
+- name: ec_a5_volumetric
+  type: number
+  units: null
+- name: ec_a5_mass
+  type: number
+  units: null
+- name: cost_volumetric
+  type: number
+  units: null
+- name: cost_mass
+  type: number
+  units: null
